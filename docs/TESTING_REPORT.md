@@ -13,7 +13,7 @@ environment. Reproduce with `make test` (backend) and `make test-e2e` (browser).
 
 Command: `cd apps/api && python -m pytest -q`
 
-**Result: 32 passed.**
+**Result: 39 passed.**
 
 | Suite | Tests | Covers |
 |-------|-------|--------|
@@ -23,6 +23,8 @@ Command: `cd apps/api && python -m pytest -q`
 | `test_response_flow.py` | 3 | Full governed pipeline (create → policy → approval → execute → verify → rollback), evidence-requirement enforcement, alert→incident promotion |
 | `test_agents_and_injection.py` | 6 | Agent evidence-first output, coordinator workflow, prompt-injection detection, DLP masking, external-content wrapping, tool-broker blocks response tools |
 | `test_connectors_and_models.py` | 6 | Simulated provider healthy, real provider without secret → `not_configured` (truthful), connector mock labeled `mock`, destructive query rejected, PDF export, audit chain intact |
+| `test_connector_live_write.py` | 5 | **Live-mode** connector write hits the real adapter HTTP path against the mock server: 200→success, 401→failure (never fabricated), missing-secret→not-sent, no write permission→blocked, endpoint-control vendor→`NotImplementedError` |
+| `test_tenant_isolation.py` | 2 | A second tenant sees none of the first tenant's incidents and is denied (404) fetching one by id — isolation enforced server-side, not by the client |
 
 ## End-to-end tests (Playwright)
 

@@ -62,11 +62,22 @@ class ConnectorAdapter:
 
     category = "generic"
     health_path = "/"  # relative path used for the live connectivity probe
+    write_path = "/api/v1/actions"  # relative path for the live response POST
     auth_style = "bearer"  # bearer | header | basic | apikey_header
 
-    def __init__(self, connector: Connector) -> None:
+    # Vendor kinds where a single HTTP POST legitimately IS the response action
+    # (message/ticket/webhook). For these the base adapter can perform a real
+    # live write and report the true outcome. Endpoint-control vendors
+    # (CrowdStrike/Defender/etc.) require bespoke multi-step APIs and stay
+    # NotImplemented until wired — see docs/KNOWN_LIMITATIONS.md.
+    http_write_kinds = {"slack", "microsoft_teams", "email_webhook",
+                        "generic_rest_siem", "generic_edr", "servicenow", "jira"}
+
+    def __init__(self, connector: Connector, http_client=None) -> None:
         self.c = connector
         self.breaker = CircuitBreaker()
+        # Injectable client so tests can target the in-process mock ASGI app.
+        self._http = http_client
 
     # --- helpers ---------------------------------------------------------
     def _secret(self) -> str | None:
@@ -136,20 +147,92 @@ class ConnectorAdapter:
         return []
 
     # --- write (response gateway only) -----------------------------------
-    def execute_action(self, action_type: str, target: dict) -> dict:
+    def _post(self, path: str, payload: dict, timeout: int) -> tuple[bool, int, dict | str]:
+        """Perform a real HTTP POST and return (ok, status_code, body).
+
+        Uses an injected client when present (so tests can target the in-process
+        mock ASGI app); otherwise opens a short-lived httpx client. The result is
+        derived strictly from the transport — success is never assumed.
+        """
+        url = self.c.base_url.rstrip("/") + path
+        client = self._http
+        close = False
+        if client is None:
+            client = httpx.Client(timeout=timeout)
+            close = True
+        try:
+            resp = client.post(url, json=payload, headers=self._headers())
+        finally:
+            if close:
+                client.close()
+        try:
+            body: dict | str = resp.json()
+        except Exception:  # noqa: BLE001
+            body = resp.text[:500]
+        return resp.status_code < 400, resp.status_code, body
+
+    @staticmethod
+    def _reference_id(body: dict | str) -> str | None:
+        if isinstance(body, dict):
+            for key in ("id", "reference_id", "ts", "ticket", "key", "message_id"):
+                if body.get(key):
+                    return str(body[key])
+            res = body.get("resources") or body.get("results")
+            if isinstance(res, list) and res and isinstance(res[0], dict):
+                return str(res[0].get("id") or res[0].get("key") or "")
+        return None
+
+    def execute_action(self, action_type: str, target: dict, timeout: int = 15) -> dict:
         if not self.c.can_write:
             raise PermissionError(f"Connector '{self.c.kind}' has no write permission.")
         if self.c.use_mock:
             from .mock_server import mock_execute
             return mock_execute(self.c.kind, action_type, target)
-        # Real implementation would POST to the product's action API and return
-        # the TRUE outcome. We never fabricate success.
-        raise NotImplementedError(
-            f"Live write for '{self.c.kind}' not implemented in this build; "
-            "supply the vendor API integration before enabling live response.")
+        # LIVE write. Only message/ticket/webhook kinds have a generic single-POST
+        # action contract the base adapter can honour. Endpoint-control vendors
+        # (CrowdStrike/Defender/etc.) need bespoke multi-step APIs and stay
+        # NotImplemented so we never guess — see docs/KNOWN_LIMITATIONS.md.
+        if self.c.kind not in self.http_write_kinds:
+            raise NotImplementedError(
+                f"Live write for '{self.c.kind}' not implemented in this build; "
+                "supply the vendor API integration before enabling live response.")
+        if not self.c.base_url:
+            return {"success": False, "vendor": self.c.kind, "action": action_type,
+                    "target": target, "error": "missing_base_url", "live": True,
+                    "summary": f"No base URL configured for '{self.c.kind}'; action not sent."}
+        if self.auth_style != "none" and not self._has_secret():
+            return {"success": False, "vendor": self.c.kind, "action": action_type,
+                    "target": target, "error": "missing_secret", "live": True,
+                    "summary": f"No credential reference configured for '{self.c.kind}'; action not sent."}
+        payload = {"action": action_type, "target": target}
+        start = time.perf_counter()
+        try:
+            ok, status, body = self._post(self.write_path, payload, timeout)
+            latency = int((time.perf_counter() - start) * 1000)
+            self.breaker.record(ok)
+            ref = self._reference_id(body)
+            summary = (f"[LIVE {self.c.kind}] {action_type} {'accepted' if ok else 'rejected'} "
+                       f"(HTTP {status})" + (f", ref={ref}" if ref else "") + ".")
+            return {"success": ok, "vendor": self.c.kind, "action": action_type,
+                    "target": target, "status_code": status, "latency_ms": latency,
+                    "reference_id": ref, "response": body, "live": True,
+                    "summary": summary}
+        except httpx.HTTPError as exc:
+            self.breaker.record(False)
+            return {"success": False, "vendor": self.c.kind, "action": action_type,
+                    "target": target, "error": str(exc)[:200], "live": True,
+                    "summary": f"[LIVE {self.c.kind}] {action_type} FAILED to send: {str(exc)[:120]}"}
 
     def verify_action(self, action_type: str, target: dict) -> dict:
         if self.c.use_mock:
             from .mock_server import mock_verify
             return mock_verify(self.c.kind, action_type, target)
-        raise NotImplementedError(f"Live verify for '{self.c.kind}' not implemented.")
+        if self.c.kind not in self.http_write_kinds:
+            raise NotImplementedError(f"Live verify for '{self.c.kind}' not implemented.")
+        # Message/ticket/webhook deliveries have no idempotent re-query; the send
+        # acknowledgement recorded at execute time IS the confirmation. We report
+        # that basis truthfully rather than re-sending or claiming a fresh check.
+        return {"confirmed": True, "vendor": self.c.kind, "state": "sent",
+                "method": "send_acknowledgement",
+                "summary": f"[LIVE {self.c.kind}] {action_type} delivery confirmed by send "
+                           "acknowledgement; no independent re-query available for this kind."}

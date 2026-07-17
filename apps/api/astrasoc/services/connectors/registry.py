@@ -63,7 +63,7 @@ def list_connector_kinds() -> list[str]:
     return list(_SPEC.keys())
 
 
-def get_adapter(connector: Connector) -> ConnectorAdapter:
+def get_adapter(connector: Connector, http_client=None) -> ConnectorAdapter:
     spec = _SPEC.get(connector.kind, (ConnectorCategory.SIEM.value, "/health", "bearer"))
     cls = _adapter(*spec)
-    return cls(connector)
+    return cls(connector, http_client=http_client)
