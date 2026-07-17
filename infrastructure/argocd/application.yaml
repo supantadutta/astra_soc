@@ -1,0 +1,26 @@
+# ArgoCD Application — GitOps deployment of ASTRASOC via the Helm chart.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: astrasoc
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/supantadutta/astra_soc.git
+    targetRevision: HEAD
+    path: infrastructure/helm/astrasoc
+    helm:
+      valueFiles:
+        - values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: astrasoc
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

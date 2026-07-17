@@ -1,0 +1,20 @@
+title: Impossible Travel Sign-in
+id: astrasoc-0002
+status: stable
+description: Successful sign-ins from geographically distant locations within a short window.
+author: ASTRASOC
+logsource:
+  category: authentication
+  product: entra_id
+detection:
+  selection:
+    activity: 'Sign-in'
+    result: success
+  timeframe: 30m
+  condition: selection and distinct_geo > 1
+falsepositives:
+  - Corporate VPN egress in another region
+level: high
+tags:
+  - attack.initial_access
+  - attack.t1078

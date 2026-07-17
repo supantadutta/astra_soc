@@ -1,0 +1,37 @@
+# ==========================================================================
+# ASTRASOC — DEMO profile
+# Zero external credentials, zero enterprise infrastructure. Just the API
+# (SQLite + simulated LLM + mock connectors) and the web command center.
+#
+#   docker compose -f docker-compose.demo.yml up --build
+#   → API  http://localhost:8000  (docs at /api/docs)
+#   → Web  http://localhost:3000  (login shown on the page)
+# ==========================================================================
+services:
+  api:
+    build:
+      context: ./apps/api
+    environment:
+      ASTRASOC_ENVIRONMENT: demo
+      ASTRASOC_DATABASE_URL: sqlite:////data/astrasoc.db
+      ASTRASOC_DEFAULT_MODE: DEMO
+      ASTRASOC_DEMO_SEED_ON_STARTUP: "true"
+      ASTRASOC_CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+    volumes:
+      - astrasoc_demo_data:/data
+    ports:
+      - "8000:8000"
+
+  web:
+    build:
+      context: ./apps/web
+    environment:
+      # Server-side rewrites proxy /api/* to the API service.
+      NEXT_PUBLIC_API_BASE_URL: http://api:8000
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+
+volumes:
+  astrasoc_demo_data:

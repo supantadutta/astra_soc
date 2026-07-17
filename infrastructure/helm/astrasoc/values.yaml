@@ -1,0 +1,38 @@
+# Default values for the ASTRASOC Helm chart.
+global:
+  imageRegistry: astrasoc
+
+api:
+  image: astrasoc/api:latest
+  replicas: 1
+  port: 8000
+  env:
+    ASTRASOC_ENVIRONMENT: production
+    ASTRASOC_DEFAULT_MODE: DEMO
+    ASTRASOC_ALLOW_LIVE_MODE: "true"
+    ASTRASOC_DATABASE_URL: "sqlite:////data/astrasoc.db"
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: "1", memory: 1Gi }
+
+web:
+  image: astrasoc/web:latest
+  replicas: 1
+  port: 3000
+  apiBaseUrl: http://astrasoc-api:8000
+
+# Set a strong secret in production (or use External Secrets).
+secrets:
+  jwtSecret: "change-me-in-production"
+
+ingress:
+  enabled: true
+  className: nginx
+  host: astrasoc.local
+
+# Optional enterprise dependencies (disabled by default; platform runs
+# degraded-but-functional without them).
+postgresql:
+  enabled: false
+redis:
+  enabled: false

@@ -1,0 +1,128 @@
+# ASTRASOC — Kubernetes manifests (demo/dev profile).
+# Apply with: kubectl apply -f infrastructure/kubernetes/astrasoc.yaml
+# For production, source secrets from a real secret store (Vault/External Secrets)
+# and add PersistentVolumeClaims + a managed Postgres.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: astrasoc
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: astrasoc-secrets
+  namespace: astrasoc
+type: Opaque
+stringData:
+  # Replace in production; never commit real secrets.
+  ASTRASOC_JWT_SECRET: "change-me-in-production-to-a-long-random-string"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: astrasoc-config
+  namespace: astrasoc
+data:
+  ASTRASOC_ENVIRONMENT: "production"
+  ASTRASOC_DEFAULT_MODE: "DEMO"
+  ASTRASOC_ALLOW_LIVE_MODE: "true"
+  ASTRASOC_DATABASE_URL: "sqlite:////data/astrasoc.db"
+  ASTRASOC_CORS_ORIGINS: "http://localhost:3000"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: astrasoc-api
+  namespace: astrasoc
+  labels: { app: astrasoc-api }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: astrasoc-api }
+  template:
+    metadata:
+      labels: { app: astrasoc-api }
+    spec:
+      containers:
+        - name: api
+          image: astrasoc/api:latest
+          ports: [{ containerPort: 8000 }]
+          envFrom:
+            - configMapRef: { name: astrasoc-config }
+            - secretRef: { name: astrasoc-secrets }
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits: { cpu: "1", memory: "1Gi" }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: data
+          emptyDir: {}   # Use a PVC in production.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: astrasoc-api
+  namespace: astrasoc
+spec:
+  selector: { app: astrasoc-api }
+  ports: [{ port: 8000, targetPort: 8000 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: astrasoc-web
+  namespace: astrasoc
+  labels: { app: astrasoc-web }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: astrasoc-web }
+  template:
+    metadata:
+      labels: { app: astrasoc-web }
+    spec:
+      containers:
+        - name: web
+          image: astrasoc/web:latest
+          ports: [{ containerPort: 3000 }]
+          env:
+            - { name: NEXT_PUBLIC_API_BASE_URL, value: "http://astrasoc-api:8000" }
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits: { cpu: "500m", memory: "512Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: astrasoc-web
+  namespace: astrasoc
+spec:
+  selector: { app: astrasoc-web }
+  ports: [{ port: 3000, targetPort: 3000 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: astrasoc
+  namespace: astrasoc
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend: { service: { name: astrasoc-api, port: { number: 8000 } } }
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: astrasoc-web, port: { number: 3000 } } }

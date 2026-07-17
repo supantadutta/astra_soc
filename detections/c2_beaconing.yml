@@ -1,0 +1,17 @@
+title: Low-Jitter C2 Beaconing
+id: astrasoc-0003
+status: experimental
+description: Regular-interval outbound connections with uniform payloads to a low-reputation domain.
+author: ASTRASOC
+logsource:
+  category: network_connection
+detection:
+  selection:
+    activity: 'Network connection'
+  condition: selection and interval_stdev < 5 and reputation_score < 0.3
+falsepositives:
+  - Allowlisted SaaS agents with periodic sync (document exceptions)
+level: high
+tags:
+  - attack.command_and_control
+  - attack.t1071.001

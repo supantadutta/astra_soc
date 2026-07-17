@@ -1,0 +1,22 @@
+{
+  "type": "playbook",
+  "spec_version": "cacao-2.0",
+  "id": "playbook--astrasoc-ransomware-containment",
+  "name": "Ransomware Precursor — Contain & Verify",
+  "description": "Triage a ransomware-precursor incident, gather evidence, then isolate the affected endpoint with human approval and verify.",
+  "playbook_types": ["notification", "investigation", "remediation"],
+  "created_by": "identity--astrasoc",
+  "workflow_start": "start--1",
+  "workflow": {
+    "start--1": { "type": "start", "on_completion": "action--enrich" },
+    "action--enrich": { "type": "action", "name": "Enrich host & user", "on_completion": "action--investigate" },
+    "action--investigate": { "type": "action", "name": "Endpoint investigation agent", "on_completion": "condition--confidence" },
+    "condition--confidence": { "type": "if-condition", "condition": "confidence >= 0.7", "on_true": "action--approval", "on_false": "end--monitor" },
+    "action--approval": { "type": "action", "name": "Human approval (incident commander)", "on_completion": "action--isolate" },
+    "action--isolate": { "type": "action", "name": "Isolate endpoint", "on_completion": "action--verify" },
+    "action--verify": { "type": "action", "name": "Verify isolation", "on_completion": "action--report" },
+    "action--report": { "type": "action", "name": "Generate incident report", "on_completion": "end--done" },
+    "end--monitor": { "type": "end" },
+    "end--done": { "type": "end" }
+  }
+}

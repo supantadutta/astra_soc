@@ -1,0 +1,78 @@
+# ==========================================================================
+# ASTRASOC — development / production-like profile
+# Adds PostgreSQL and Redis. The API auto-creates tables on first boot (use
+# Alembic migrations in a real production deployment: `alembic upgrade head`).
+# Optional enterprise datastores (ClickHouse, Neo4j, OpenSearch, Redpanda,
+# Temporal, OPA, Vault, Keycloak) are documented in docs/DEPLOYMENT.md; the
+# platform runs degraded-but-functional without them and reports their status
+# honestly on the Platform Health page.
+#
+#   docker compose up --build
+# ==========================================================================
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: astrasoc
+      POSTGRES_PASSWORD: astrasoc
+      POSTGRES_DB: astrasoc
+    volumes:
+      - astrasoc_pg:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U astrasoc"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ./apps/api
+    environment:
+      ASTRASOC_ENVIRONMENT: production
+      ASTRASOC_DATABASE_URL: postgresql+psycopg2://astrasoc:astrasoc@postgres:5432/astrasoc
+      ASTRASOC_REDIS_URL: redis://redis:6379/0
+      ASTRASOC_DEFAULT_MODE: DEMO
+      ASTRASOC_ALLOW_LIVE_MODE: "true"
+      # REQUIRED in production — set a strong secret.
+      ASTRASOC_JWT_SECRET: ${ASTRASOC_JWT_SECRET:-change-me-in-production-to-a-long-random-string}
+      ASTRASOC_CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  web:
+    build:
+      context: ./apps/web
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://api:8000
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+
+  # Optional mock integration server for connector contract testing.
+  mockserver:
+    build:
+      context: ./apps/api
+    command: ["uvicorn", "astrasoc.services.connectors.mock_server:mock_app", "--host", "0.0.0.0", "--port", "9900"]
+    ports:
+      - "9900:9900"
+
+volumes:
+  astrasoc_pg:

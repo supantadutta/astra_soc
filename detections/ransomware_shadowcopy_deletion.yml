@@ -1,0 +1,19 @@
+title: Shadow Copy Deletion via vssadmin
+id: astrasoc-0001
+status: stable
+description: Detects deletion of Volume Shadow Copies, a common ransomware pre-encryption step.
+author: ASTRASOC
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection:
+    activity: 'vssadmin'
+    process: 'vssadmin.exe delete shadows'
+  condition: selection
+falsepositives:
+  - Legitimate backup software maintenance (rare; document exceptions)
+level: critical
+tags:
+  - attack.impact
+  - attack.t1490
