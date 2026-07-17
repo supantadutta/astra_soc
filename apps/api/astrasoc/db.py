@@ -16,6 +16,8 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.types import JSON
 
+from .config import settings
+
 
 class TZDateTime(TypeDecorator):
     """Timezone-aware datetime that stays aware even on SQLite.
@@ -38,7 +40,6 @@ class TZDateTime(TypeDecorator):
             return value.replace(tzinfo=UTC)
         return value
 
-from .config import settings
 
 # Deterministic constraint naming keeps Alembic migrations stable.
 NAMING_CONVENTION = {

@@ -13,7 +13,7 @@ extend-exclude = [".venv", "alembic"]
 select = ["E", "F", "I", "UP", "B"]
 # B008: FastAPI Depends() in defaults is idiomatic.
 # B904: routers deliberately translate service exceptions into HTTPException.
-ignore = ["B008", "B904", "E501"]
+ignore = ["B008", "B904", "E501", "UP042"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

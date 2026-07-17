@@ -1,0 +1,109 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  background-color: #05070d;
+  color: #e6f0ff;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Fine technical grid + radar wash behind the app. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background-image: linear-gradient(rgba(34, 211, 238, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(34, 211, 238, 0.04) 1px, transparent 1px);
+  background-size: 44px 44px;
+  pointer-events: none;
+  z-index: 0;
+  mask-image: radial-gradient(ellipse at 50% 0%, black, transparent 85%);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: #0a0f1c;
+}
+::-webkit-scrollbar-thumb {
+  background: #1d3352;
+  border-radius: 8px;
+  border: 2px solid #0a0f1c;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #22d3ee44;
+}
+
+@layer components {
+  .glass {
+    @apply bg-navy-800/70 backdrop-blur-md border border-white/5;
+  }
+  .panel {
+    @apply glass rounded-xl shadow-panel;
+  }
+  .panel-hover {
+    @apply transition-all duration-200 hover:border-cyan/30 hover:shadow-glow;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium
+      transition-all duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan/60
+      disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply btn bg-cyan/15 text-cyan border border-cyan/40 hover:bg-cyan/25 hover:shadow-glow;
+  }
+  .btn-ghost {
+    @apply btn text-ink-200 border border-white/5 hover:bg-white/5 hover:text-ink-100;
+  }
+  .btn-danger {
+    @apply btn bg-crit/15 text-crit border border-crit/40 hover:bg-crit/25;
+  }
+  .btn-violet {
+    @apply btn bg-violet/15 text-violet border border-violet/40 hover:bg-violet/25 hover:shadow-glow-violet;
+  }
+  .input {
+    @apply w-full rounded-lg bg-navy-900/80 border border-white/10 px-3 py-2 text-sm text-ink-100
+      placeholder:text-ink-500 focus:outline-none focus:border-cyan/50 focus:ring-1 focus:ring-cyan/40;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium border;
+  }
+  .label {
+    @apply text-[11px] uppercase tracking-wider text-ink-400 font-semibold;
+  }
+  .card-title {
+    @apply text-sm font-semibold text-ink-100;
+  }
+  .stat-value {
+    @apply text-3xl font-bold tracking-tight tabular-nums;
+  }
+}
+
+/* Reduced-motion accessibility + the manual "reduce animation" toggle. */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+html[data-reduce-motion="true"] * {
+  animation: none !important;
+  transition: none !important;
+}
+
+/* React Flow dark theme tweaks */
+.react-flow__attribution {
+  display: none;
+}
+.react-flow__node {
+  font-size: 11px;
+}
