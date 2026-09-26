@@ -50,13 +50,9 @@ def _check_tenant_active(db: Session, tenant_id: uuid.UUID) -> Tenant:
     return tenant
 
 
-def _principal_from_user(db: Session, user: User, session_id: str | None = None,
-                         scopes: list[str] | None = None) -> Principal:
+def _principal_from_user(db: Session, user: User, session_id: str | None = None) -> Principal:
     perms, roles = _effective_permissions(db, user)
     tenant = _check_tenant_active(db, user.tenant_id)
-    if scopes:
-        # A scoped API key can never exceed its owner's current permissions.
-        perms = sorted(p for p in scopes if role_has_permission(perms, p))
     return Principal(
         user_id=user.id,
         tenant_id=user.tenant_id,
@@ -82,11 +78,21 @@ def get_current_principal(
 ) -> Principal:
     """Resolve the caller from a Bearer JWT or an API key, then apply MSSP
     tenant-context switching when ``X-Tenant-ID`` names another tenant."""
-    principal, user = _authenticate(db, authorization, x_api_key)
+    principal, user, key = _authenticate(db, authorization, x_api_key)
     principal.home_tenant_id = principal.tenant_id
     principal.home_tenant_slug = principal.tenant_slug
     principal.home_permissions = list(principal.permissions)
-    if x_tenant_id and x_tenant_id not in (str(principal.tenant_id), principal.tenant_slug):
+    if key is not None:
+        # An API key always operates in the tenant it was issued for. If that
+        # is a customer tenant entered by provider staff, the delegation rules
+        # are re-evaluated on every use (revoked grants / customer opt-out
+        # take effect immediately), then the key's scopes are applied.
+        if key.tenant_id != user.tenant_id:
+            _enter_tenant(db, principal, user, str(key.tenant_id))
+        if key.scopes:
+            principal.permissions = sorted(
+                p for p in key.scopes if role_has_permission(principal.permissions, p))
+    elif x_tenant_id and x_tenant_id not in (str(principal.tenant_id), principal.tenant_slug):
         _enter_tenant(db, principal, user, x_tenant_id)
     request.state.principal = principal
     return principal
@@ -117,7 +123,7 @@ def _enter_tenant(db: Session, principal: Principal, user: User, ref: str) -> No
 
 
 def _authenticate(db: Session, authorization: str | None,
-                  x_api_key: str | None) -> tuple[Principal, User]:
+                  x_api_key: str | None) -> tuple[Principal, User, APIKey | None]:
     # 1) API key (machine identities).
     if x_api_key:
         prefix = x_api_key.split(".", 1)[0]
@@ -132,7 +138,7 @@ def _authenticate(db: Session, authorization: str | None,
                 raise _unauthorized("API key owner is missing or disabled")
             key.last_used_at = datetime.now(UTC)
             db.flush()
-            return _principal_from_user(db, user, scopes=key.scopes or None), user
+            return _principal_from_user(db, user), user, key
         raise _unauthorized("Invalid API key")
 
     # 2) Bearer JWT (interactive users).
@@ -165,7 +171,7 @@ def _authenticate(db: Session, authorization: str | None,
     user = db.get(User, user_id)
     if user is None or not user.is_active:
         raise _unauthorized("User not found or inactive")
-    return _principal_from_user(db, user, session_id=sid), user
+    return _principal_from_user(db, user, session_id=sid), user, None
 
 
 def require_permission(permission: str):

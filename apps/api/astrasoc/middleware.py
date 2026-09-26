@@ -37,7 +37,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         # Never rate-limit the health probe or the SSE stream.
-        if request.url.path in ("/health", "/api/v1/health/live") or request.url.path.endswith("/stream"):
+        if request.url.path in ("/health", "/api/v1/health/live", "/api/v1/stream"):
             return await call_next(request)
         client = request.client.host if request.client else "unknown"
         now = time.time()

@@ -53,6 +53,7 @@ PERMISSIONS: dict[str, str] = {
     # Integrations
     "connector:read": "View connectors",
     "connector:manage": "Configure connectors and test connections",
+    "event:ingest": "Push security events into the ingestion pipeline",
     # Platform administration
     "audit:read": "Read audit logs",
     "rbac:manage": "Manage roles and assignments",
@@ -127,7 +128,7 @@ BUILTIN_ROLES: dict[str, list[str]] = {
     ],
     "integration_service_account": [
         "alert:read", "alert:write", "incident:read", "incident:write",
-        "connector:read", "query:run",
+        "connector:read", "query:run", "event:ingest",
     ],
     "automation_service_account": [
         "incident:read", "agent:run", "action:request", "playbook:read", "playbook:run",

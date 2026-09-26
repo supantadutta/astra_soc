@@ -16,6 +16,8 @@ from ..schemas.common import serialize
 from ..services import audit
 from ..services.connectors.registry import get_adapter
 from ..services.egress import EgressError, validate_outbound_url
+from ..services.mode import current_scope
+from ..services.pipeline import ingest_batch
 from ..services.secrets import SecretRefError, secret_configured, validate_secret_ref
 
 router = APIRouter(prefix="/api/v1/connectors", tags=["connectors"])
@@ -138,15 +140,29 @@ def test_connection(connector_id: uuid.UUID,
 def sync_connector(connector_id: uuid.UUID,
                    principal: Principal = Depends(require_permission("connector:manage")),
                    db: Session = Depends(get_db)) -> dict:
+    """Pull events from the connector and run them through the pipeline.
+
+    Mock connectors produce simulated data and may only feed the DEMO scope:
+    syncing a mock connector while the tenant is LIVE is refused, so
+    simulated events can never contaminate live data."""
     c = db.get(Connector, connector_id)
     if not c or c.tenant_id != principal.tenant_id:
         raise HTTPException(404, detail="Connector not found")
-    if not c.enabled:
-        raise HTTPException(400, detail="Connector is disabled.")
+    if not c.enabled or not c.can_read:
+        raise HTTPException(400, detail="Connector is disabled or not read-enabled.")
+    scope = current_scope(db, principal.tenant_id)
+    if c.use_mock and scope == "LIVE":
+        raise HTTPException(409, detail={"error": "mock_in_live",
+                                         "message": "Mock connectors cannot feed LIVE data."})
     events = get_adapter(c).fetch_events()
+    result = ingest_batch(db, principal.tenant_id, scope, events, connector_id=c.id) if events \
+        else {"ingested": 0, "alerts": 0}
     audit.record(db, action="connector.sync", actor_id=principal.user_id,
-                 tenant_id=principal.tenant_id, resource_type="connector",
-                 resource_id=str(connector_id), detail={"fetched": len(events)})
+                 actor_label=principal.label, tenant_id=principal.tenant_id,
+                 resource_type="connector", resource_id=str(connector_id), data_scope=scope,
+                 detail={**result, "mock": c.use_mock})
     db.commit()
-    return {"fetched": len(events), "sample": events[:5],
-            "note": "Mock/read-only fetch. Live ingestion writes normalized OCSF events."}
+    note = ("Simulated events from the built-in mock server." if c.use_mock else
+            "Live pull adapters for this vendor return no events in this build; "
+            "use the push ingestion API (/api/v1/ingest/events) for live telemetry.")
+    return {**result, "scope": scope, "mock": c.use_mock, "note": note}

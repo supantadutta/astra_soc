@@ -154,7 +154,7 @@ def trends(principal: Principal = Depends(require_permission("incident:read")),
 def live_events(principal: Principal = Depends(require_permission("incident:read")),
                 db: Session = Depends(get_db), limit: int = 30) -> dict:
     scope = current_scope(db, principal.tenant_id)
-    events = bus.recent(scope, limit=limit)
+    events = bus.recent(str(principal.tenant_id), scope, limit=max(1, min(limit, 200)))
     return {"events": [{"type": e.type, "ts": e.ts, **e.data} for e in events]}
 
 
@@ -187,8 +187,10 @@ def platform_health(principal: Principal = Depends(require_permission("health:re
              "detail": "sqlite" if settings.is_sqlite else "postgresql"},
             {"name": "event_bus", "state": "healthy",
              "detail": f"{bus.subscriber_count} subscribers, {bus.total_published} published"},
-            {"name": "demo_generator", "state": "healthy" if generator_state()["running"]
-             else "degraded", "detail": generator_state()},
+            {"name": "demo_generator",
+             "state": ("unhealthy" if generator_state().get("last_error")
+                       else "healthy" if generator_state()["running"] else "not_running"),
+             "detail": generator_state()},
         ],
         "dependencies": [
             {"name": "redis", "state": "not_configured" if not settings.redis_url else "configured"},

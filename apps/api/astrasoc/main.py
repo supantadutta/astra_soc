@@ -9,7 +9,6 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sse_starlette.sse import EventSourceResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .config import settings
@@ -44,6 +43,11 @@ async def run_sla_sweeper(interval: float = 60.0) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 0) Deliver events published from worker threads on this loop.
+    from .services.events import bus
+
+    bus.bind_loop(asyncio.get_running_loop())
+
     # 1) Schema + baseline seed (idempotent).
     init_db()
     from .seed.bootstrap import ensure_seed
@@ -127,38 +131,6 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     )
 
 
-# --- Live event stream (SSE) ---------------------------------------------
-@app.get("/api/v1/stream", tags=["system"])
-async def event_stream(request: Request, scope: str = "DEMO"):
-    """Server-Sent Events stream of platform activity for the given scope.
-
-    The dashboard and module views subscribe here for real-time updates without
-    polling or full-page refreshes.
-    """
-    from .services.events import bus
-
-    queue = await bus.subscribe()
-
-    async def generator():
-        try:
-            # Replay a little recent history so a fresh client isn't blank.
-            for ev in bus.recent(scope, limit=20):
-                yield ev.sse()
-            while True:
-                if await request.is_disconnected():
-                    break
-                try:
-                    ev = await asyncio.wait_for(queue.get(), timeout=15.0)
-                    if ev.scope == scope:
-                        yield ev.sse()
-                except TimeoutError:
-                    yield {"event": "heartbeat", "data": "{}"}
-        finally:
-            bus.unsubscribe(queue)
-
-    return EventSourceResponse(generator())
-
-
 @app.get("/health", tags=["system"])
 async def health():
     return {"status": "ok", "service": "astrasoc-api", "version": "0.1.0"}
@@ -187,6 +159,7 @@ def register_routers() -> None:
         entities,
         evaluations,
         incidents,
+        ingest,
         knowledge,
         models,
         mssp,
@@ -195,6 +168,7 @@ def register_routers() -> None:
         rbac,
         reports,
         response,
+        stream,
         system,
         threatintel,
     )
@@ -203,7 +177,7 @@ def register_routers() -> None:
     for module in (
         auth, system, dashboard, alerts, incidents, entities, agents, models,
         connectors, detections, threatintel, playbooks, response, knowledge,
-        reports, rbac, audit_log, evaluations, demo, mssp, notifications,
+        reports, rbac, audit_log, evaluations, demo, mssp, notifications, stream, ingest,
     ):
         app.include_router(module.router)
 

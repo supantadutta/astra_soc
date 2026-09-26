@@ -10,6 +10,7 @@ Everything produced here is ``data_scope="DEMO"`` and clearly simulated.
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -38,6 +39,7 @@ from ..services.events import Event, bus
 from .scenarios import SCENARIO_INDEX, SCENARIOS
 
 DEMO = DataScope.DEMO.value
+logger = logging.getLogger("astrasoc.demo")
 
 # Denominators for continuous synthetic telemetry.
 _EVENT_SOURCES = ["crowdstrike_falcon", "microsoft_defender", "splunk", "vectra",
@@ -308,7 +310,8 @@ def launch_scenario(db: Session, tenant_id: uuid.UUID, key: str) -> Incident:
 
 
 # --- Continuous generator -------------------------------------------------
-_generator_state = {"running": False, "paused": False, "speed": 1.0, "events": 0, "aps": 0.0}
+_generator_state = {"running": False, "paused": False, "speed": 1.0, "events": 0, "aps": 0.0,
+                    "last_error": None}
 
 
 def generator_state() -> dict:
@@ -323,64 +326,60 @@ def set_generator(paused: bool | None = None, speed: float | None = None) -> dic
     return generator_state()
 
 
-def _emit_tick() -> None:
-    """One synchronous tick: create a synthetic event, sometimes an alert."""
+_BENIGN = [
+    {"activity": "Process create", "cmdline": "C:\\Windows\\System32\\svchost.exe -k netsvcs"},
+    {"activity": "Process create", "cmdline": "\"C:\\Program Files\\Microsoft Office\\WINWORD.EXE\" /n"},
+    {"activity": "Network connection", "dst_ip": "52.96.165.18", "dst_port": 443},
+    {"activity": "DNS query", "query": "login.microsoftonline.com"},
+    {"activity": "Sign-in", "result": "success", "src_ip": "10.20.4.18"},
+    {"activity": "File write", "path": "C:\\Users\\Public\\report.xlsx"},
+]
+# Attack patterns the starter detection content recognises. IPs/domains are
+# the seeded threat-intel indicators.
+_MALICIOUS = [
+    {"activity": "Process create", "cmdline": "vssadmin.exe delete shadows /all /quiet",
+     "severity": "high"},
+    {"activity": "Process create", "cmdline": "powershell.exe -nop -w hidden -enc SQBFAFgAIAAoAE4AZQB3AA==",
+     "severity": "medium"},
+    {"activity": "Process access", "target_process": "lsass.exe", "severity": "high"},
+    {"activity": "Network connection", "dst_ip": "88.119.169.20", "dst_port": 443, "severity": "medium"},
+    {"activity": "DNS query", "query": "cdn-metrics-sync.com", "severity": "low"},
+    {"activity": "Sign-in", "result": "success", "src_ip": "185.220.101.42", "severity": "medium"},
+    {"activity": "Group membership change", "group": "Domain Admins", "severity": "medium"},
+]
+
+
+def _synthetic_event() -> dict:
+    malicious = random.random() < 0.06
+    tmpl = dict(random.choice(_MALICIOUS if malicious else _BENIGN))
+    tmpl.setdefault("severity", random.choices(["info", "low", "medium"], weights=[60, 30, 10])[0])
+    tmpl.update({
+        "source": random.choice(_EVENT_SOURCES), "host": random.choice(_HOSTS),
+        "user": random.choice(_USERS), "synthetic": True,
+    })
+    tmpl.setdefault("src_ip", f"10.0.{random.randint(0, 255)}.{random.randint(1, 254)}")
+    return tmpl
+
+
+def _emit_tick() -> int:
+    """One tick: one synthetic event per demo customer tenant that is in DEMO
+    mode, pushed through the real detection/correlation pipeline. Tenants in
+    LIVE mode never receive generated data."""
     from ..services.mode import current_scope
+    from ..services.pipeline import ingest_event
 
+    produced = 0
     with SessionLocal() as db:
-        tenant = db.execute(select(Tenant)).scalars().first()
-        if tenant is None:
-            return
-        scope = current_scope(db)
-        # Only fabricate data in DEMO scope. In LIVE, ingestion comes from
-        # real connectors, never the generator.
-        if scope != DEMO:
-            return
-        now = datetime.now(UTC)
-        cls = random.choice(_OCSF_CLASSES)
-        ev = SecurityEvent(
-            tenant_id=tenant.id, data_scope=DEMO, source=random.choice(_EVENT_SOURCES),
-            event_time=now, ocsf_class_uid=cls[0], ocsf_category=cls[1],
-            activity=random.choice(["Process create", "Network connection", "Sign-in",
-                                    "File write", "DNS query"]),
-            severity=random.choices(["info", "low", "medium", "high"],
-                                    weights=[50, 30, 15, 5])[0],
-            ocsf={"synthetic": True}, raw={"synthetic": True},
-            host_name=random.choice(_HOSTS), user_name=random.choice(_USERS),
-            src_ip=f"10.0.{random.randint(0,255)}.{random.randint(1,254)}",
-        )
-        db.add(ev)
-        _generator_state["events"] += 1
-
-        made_alert = False
-        if random.random() < 0.12:  # occasional new deterministic alert
-            made_alert = True
-            sev = random.choices(["low", "medium", "high", "critical"],
-                                 weights=[40, 35, 20, 5])[0]
-            alert = Alert(
-                tenant_id=tenant.id, data_scope=DEMO,
-                title=f"[SIMULATED] {ev.activity} anomaly on {ev.host_name}",
-                description="Synthetic demo alert generated by the demo event engine.",
-                source=ev.source, severity=sev, status=AlertStatus.NEW.value,
-                risk_score=random.randint(20, 90), confidence=round(random.uniform(0.4, 0.9), 2),
-                attack_techniques=random.sample(["T1059", "T1071", "T1078", "T1110"],
-                                                k=random.randint(1, 2)),
-                observables={"host": ev.host_name, "user": ev.user_name},
-                event_ids=[str(ev.id)],
-            )
-            db.add(alert)
+        tenant_ids = [t.id for t in db.execute(select(Tenant).where(
+            Tenant.kind == "customer", Tenant.is_active.is_(True))).scalars()]
+        for tid in tenant_ids:
+            if current_scope(db, tid) != DEMO:
+                continue
+            ingest_event(db, tid, DEMO, _synthetic_event())
+            produced += 1
         db.commit()
-
-    bus.publish_soon(Event(
-        type="event.ingested", scope=DEMO, tenant_id=str(tenant.id),
-        data={"source": ev.source, "activity": ev.activity, "severity": ev.severity,
-              "host": ev.host_name, "simulated": True},
-    ))
-    if made_alert:
-        bus.publish_soon(Event(
-            type="alert.created", scope=DEMO, tenant_id=str(tenant.id),
-            data={"title": alert.title, "severity": alert.severity, "simulated": True},
-        ))
+    _generator_state["events"] += produced
+    return produced
 
 
 async def run_live_generator() -> None:
@@ -391,10 +390,12 @@ async def run_live_generator() -> None:
         while True:
             if not _generator_state["paused"]:
                 try:
-                    await asyncio.to_thread(_emit_tick)
-                    _generator_state["aps"] = round(_generator_state["speed"] / interval, 2)
-                except Exception:  # pragma: no cover — never let the loop die
-                    pass
+                    produced = await asyncio.to_thread(_emit_tick)
+                    _generator_state["aps"] = round(produced * _generator_state["speed"] / interval, 2)
+                    _generator_state["last_error"] = None
+                except Exception as exc:  # never let the loop die — but surface the error
+                    _generator_state["last_error"] = f"{type(exc).__name__}: {exc}"[:300]
+                    logger.exception("Demo generator tick failed")
             await asyncio.sleep(max(0.3, interval / _generator_state["speed"]))
     except asyncio.CancelledError:  # pragma: no cover
         _generator_state["running"] = False
