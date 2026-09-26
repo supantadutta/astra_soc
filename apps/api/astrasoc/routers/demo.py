@@ -70,5 +70,9 @@ def get_generator(principal: Principal = Depends(require_permission("demo:manage
 @router.post("/generator")
 def control_generator(payload: dict,
                       principal: Principal = Depends(require_permission("demo:manage"))) -> dict:
-    """Pause/resume/speed the synthetic event generator."""
+    """Pause/resume/speed the synthetic event generator. The generator is
+    shared by every demo tenant, so only the platform operator controls it."""
+    if not principal.is_platform_admin:
+        raise HTTPException(403, detail={"error": "platform_only",
+                                         "message": "The demo generator is platform-wide."})
     return set_generator(paused=payload.get("paused"), speed=payload.get("speed"))

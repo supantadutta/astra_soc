@@ -30,15 +30,41 @@ def is_read_only(query: str) -> tuple[bool, str | None]:
     return True, None
 
 
-def evaluate_matcher(matcher: dict, event: dict) -> bool:
+MATCHER_OPS = {"eq", "ne", "contains", "regex", "in", "gte", "lte", "threat_intel", "exists"}
+
+
+def validate_matcher(matcher: dict) -> None:
+    """Raise ValueError if a matcher spec is malformed (unknown op, bad regex)."""
+    if not isinstance(matcher, dict) or not matcher:
+        raise ValueError("matcher must be a non-empty object")
+    conds = matcher.get("all") or matcher.get("any") or [matcher]
+    if not isinstance(conds, list) or not conds:
+        raise ValueError("matcher.all / matcher.any must be a non-empty list")
+    for c in conds:
+        if not isinstance(c, dict) or not c.get("field"):
+            raise ValueError("each condition needs a field")
+        op = c.get("op", "eq")
+        if op not in MATCHER_OPS:
+            raise ValueError(f"unknown op '{op}' (allowed: {sorted(MATCHER_OPS)})")
+        if op == "regex":
+            pattern = str(c.get("value", ""))
+            if len(pattern) > 300:
+                raise ValueError("regex too long (max 300 chars)")
+            re.compile(pattern)
+        if op == "in" and not isinstance(c.get("value"), list):
+            raise ValueError("'in' needs a list value")
+
+
+def evaluate_matcher(matcher: dict, event: dict, context: dict | None = None) -> bool:
     """Evaluate a compiled matcher spec against a single event dict.
 
-    Supported operators (AND across keys):
-      {"field": "activity", "op": "contains", "value": "vssadmin"}
-    combined via {"all": [...], "any": [...]}.
+    Conditions look at top-level event fields first, then the OCSF payload.
+    Combine with {"all": [...]} or {"any": [...]}. ``threat_intel`` matches
+    when the value is in ``context["iocs"]`` (the tenant's enabled indicators).
     """
     if not matcher:
         return False
+    iocs = (context or {}).get("iocs") or set()
 
     def _cond(c: dict) -> bool:
         field = c.get("field", "")
@@ -46,24 +72,30 @@ def evaluate_matcher(matcher: dict, event: dict) -> bool:
         val = c.get("value")
         actual = event.get(field)
         if actual is None:
-            # search nested ocsf/raw
             actual = (event.get("ocsf", {}) or {}).get(field)
+        if op == "exists":
+            return actual is not None
         if actual is None:
             return False
         actual_s = str(actual).lower()
         if op == "eq":
             return actual_s == str(val).lower()
+        if op == "ne":
+            return actual_s != str(val).lower()
         if op == "contains":
             return str(val).lower() in actual_s
         if op == "regex":
-            return re.search(str(val), str(actual), re.IGNORECASE) is not None
+            return re.search(str(val), str(actual)[:4096], re.IGNORECASE) is not None
         if op == "in":
             return actual_s in [str(v).lower() for v in (val or [])]
-        if op == "gte":
+        if op == "threat_intel":
+            return actual_s in iocs
+        if op in ("gte", "lte"):
             try:
-                return float(actual) >= float(val)
+                a, b = float(actual), float(val)
             except (TypeError, ValueError):
                 return False
+            return a >= b if op == "gte" else a <= b
         return False
 
     if "all" in matcher:
@@ -73,34 +105,48 @@ def evaluate_matcher(matcher: dict, event: dict) -> bool:
     return _cond(matcher)
 
 
+def event_payload(ev: SecurityEvent) -> dict:
+    """The dict a matcher sees for a stored event."""
+    return {"activity": ev.activity, "source": ev.source, "severity": ev.severity,
+            "host_name": ev.host_name, "user_name": ev.user_name, "src_ip": ev.src_ip,
+            "dst_ip": ev.dst_ip, "ocsf": ev.ocsf or {}}
+
+
+def tenant_iocs(db: Session, tenant_id: uuid.UUID) -> set[str]:
+    from ..models import ThreatIndicator
+
+    now = datetime.now(UTC)
+    rows = db.execute(select(ThreatIndicator.value, ThreatIndicator.expires_at).where(
+        ThreatIndicator.tenant_id == tenant_id, ThreatIndicator.enabled.is_(True))).all()
+    return {v.lower() for v, exp in rows if exp is None or exp > now}
+
+
 def replay_rule(db: Session, tenant_id: uuid.UUID, rule: DetectionRule, scope: str,
                 limit: int = 500) -> dict[str, Any]:
-    """Run a rule over recent events to estimate matches (historical replay)."""
+    """Run a rule over recent events (historical replay).
+
+    Precision/recall are reported ONLY when the rule's test data carries
+    ground-truth labels (``test_data.labels.positive_event_ids``); otherwise
+    they are ``None`` — never estimated."""
     events = db.execute(
         select(SecurityEvent).where(
             SecurityEvent.tenant_id == tenant_id, SecurityEvent.data_scope == scope
         ).order_by(SecurityEvent.event_time.desc()).limit(limit)
     ).scalars().all()
-    matches = 0
-    matched_ids: list[str] = []
-    for ev in events:
-        payload = {"activity": ev.activity, "source": ev.source, "severity": ev.severity,
-                   "host_name": ev.host_name, "user_name": ev.user_name,
-                   "src_ip": ev.src_ip, "dst_ip": ev.dst_ip, "ocsf": ev.ocsf}
-        if evaluate_matcher(rule.matcher, payload):
-            matches += 1
-            matched_ids.append(str(ev.id))
-    # Precision/recall only meaningful when test labels exist.
-    labels = (rule.test_data or {}).get("labels")
+    ctx = {"iocs": tenant_iocs(db, tenant_id)}
+    matched_ids = [str(ev.id) for ev in events if evaluate_matcher(rule.matcher, event_payload(ev), ctx)]
+    labels = (rule.test_data or {}).get("labels") or {}
+    positives = set(labels.get("positive_event_ids") or [])
     precision = recall = None
-    if labels:
-        tp = matches  # simplified: assume matched == predicted positive
-        expected = labels.get("expected_matches", tp)
-        precision = round(tp / max(1, tp), 3)
-        recall = round(min(1.0, tp / max(1, expected)), 3)
-    return {"scanned": len(events), "matches": matches, "matched_event_ids": matched_ids[:50],
-            "precision": precision, "recall": recall,
-            "evaluated_at": datetime.now(UTC).isoformat()}
+    if positives:
+        scanned = {str(e.id) for e in events}
+        positives &= scanned
+        tp = len(positives & set(matched_ids))
+        precision = round(tp / len(matched_ids), 3) if matched_ids else None
+        recall = round(tp / len(positives), 3) if positives else None
+    return {"scanned": len(events), "matches": len(matched_ids),
+            "matched_event_ids": matched_ids[:50], "precision": precision, "recall": recall,
+            "labelled": bool(positives), "evaluated_at": datetime.now(UTC).isoformat()}
 
 
 def translate_sigma(sigma: str, target: str) -> dict[str, Any]:

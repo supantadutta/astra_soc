@@ -170,11 +170,20 @@ def platform_health(principal: Principal = Depends(require_permission("health:re
     connectors = db.execute(select(Connector).where(Connector.tenant_id == tid)).scalars().all()
     failed_actions = db.execute(select(func.count()).select_from(ResponseAction).where(
         ResponseAction.tenant_id == tid, ResponseAction.status == "failed")).scalar() or 0
+    from ..models import WorkflowRun
+
+    waiting_workflows = db.execute(select(func.count()).select_from(WorkflowRun).where(
+        WorkflowRun.tenant_id == tid, WorkflowRun.status == "waiting_approval")).scalar() or 0
+    try:
+        db.execute(select(1))
+        db_state = "healthy"
+    except Exception:  # pragma: no cover
+        db_state = "unhealthy"
     return {
         "mode": get_mode(db, principal.tenant_id).to_dict(),
         "services": [
             {"name": "api", "state": "healthy"},
-            {"name": "database", "state": "healthy",
+            {"name": "database", "state": db_state,
              "detail": "sqlite" if settings.is_sqlite else "postgresql"},
             {"name": "event_bus", "state": "healthy",
              "detail": f"{bus.subscriber_count} subscribers, {bus.total_published} published"},
@@ -195,6 +204,8 @@ def platform_health(principal: Principal = Depends(require_permission("health:re
                                                p.circuit_open_until > datetime.now(UTC))}
                          for p in providers],
         "connectors": [{"name": c.name, "enabled": c.enabled, "mock": c.use_mock} for c in connectors],
+        # Only queues that actually exist are reported. The in-process
+        # workers have no retry / dead-letter queues in this build.
         "queues": {"failed_response_actions": failed_actions,
-                   "dead_letter": 0, "retry_queue": 0},
+                   "waiting_workflows": waiting_workflows},
     }

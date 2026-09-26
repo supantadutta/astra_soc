@@ -248,22 +248,48 @@ def ensure_demo_estate_data(db: Session) -> None:
 
 
 def reset_demo(db: Session, tenant_id: uuid.UUID) -> dict:
-    """Delete ALL demo-scoped operational data for a tenant and reseed.
+    """Delete ALL demo-scoped operational data for ONE tenant and reseed.
 
-    Only DEMO-scoped rows are touched — LIVE data is never affected.
+    Every delete is filtered by tenant AND ``data_scope == "DEMO"`` (join
+    tables through their DEMO parent rows). LIVE data and other tenants are
+    never touched.
     """
+    from ..models import (
+        AgentRun,
+        ApprovalRequest,
+        PolicyDecision,
+        Report,
+        ResponseAction,
+        ToolExecution,
+        WorkflowRun,
+    )
+    from .bootstrap import demo_customer_scenarios
+
     scope = DEMO
-    for model in (IncidentAlert,):
-        db.execute(delete(model))  # join table (demo-only in practice)
-    for model in (Evidence, TimelineEntry, Hypothesis, EntityRelationship,
+    demo_incidents = select(Incident.id).where(Incident.tenant_id == tenant_id,
+                                               Incident.data_scope == scope)
+    demo_actions = select(ResponseAction.id).where(ResponseAction.tenant_id == tenant_id,
+                                                   ResponseAction.data_scope == scope)
+    db.execute(delete(IncidentAlert).where(IncidentAlert.incident_id.in_(demo_incidents)))
+    db.execute(delete(ApprovalRequest).where(ApprovalRequest.tenant_id == tenant_id,
+                                             ApprovalRequest.response_action_id.in_(demo_actions)))
+    db.execute(delete(PolicyDecision).where(PolicyDecision.tenant_id == tenant_id,
+                                            PolicyDecision.response_action_id.in_(demo_actions)))
+    counts = {}
+    for model in (ResponseAction, WorkflowRun, AgentRun, ToolExecution, Report,
+                  Evidence, TimelineEntry, Hypothesis, EntityRelationship,
                   Alert, SecurityEvent, Entity, Incident):
-        db.execute(delete(model).where(
-            model.tenant_id == tenant_id, model.data_scope == scope))
+        res = db.execute(delete(model).where(model.tenant_id == tenant_id,
+                                             model.data_scope == scope))
+        counts[model.__tablename__] = res.rowcount or 0
     db.commit()
-    ensure_demo_data(db, tenant_id)
+    tenant = db.get(Tenant, tenant_id)
+    limit = demo_customer_scenarios().get(tenant.slug) if tenant else None
+    ensure_demo_data(db, tenant_id, limit=limit)
     bus.publish_soon(Event(type="demo.reset", scope=DEMO, tenant_id=str(tenant_id),
                            data={"message": "Demo data reset and reseeded."}))
-    return {"status": "reset", "scenarios": len(SCENARIOS)}
+    return {"status": "reset", "deleted": counts,
+            "scenarios": limit if limit is not None else len(SCENARIOS)}
 
 
 def launch_scenario(db: Session, tenant_id: uuid.UUID, key: str) -> Incident:
