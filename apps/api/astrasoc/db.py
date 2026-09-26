@@ -118,8 +118,44 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
+def _alembic_config():
+    from pathlib import Path
+
+    from alembic.config import Config
+
+    root = Path(__file__).resolve().parent.parent
+    cfg = Config(str(root / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "alembic"))
+    return cfg
+
+
+def schema_is_current() -> bool:
+    from alembic.runtime.migration import MigrationContext
+    from alembic.script import ScriptDirectory
+
+    head = ScriptDirectory.from_config(_alembic_config()).get_current_head()
+    with engine.connect() as conn:
+        current = MigrationContext.configure(conn).get_current_revision()
+    return current == head
+
+
 def init_db() -> None:
-    """Create all tables (used by the demo/test profiles; production uses Alembic)."""
+    """Prepare the schema.
+
+    * production: never ``create_all``. With ``ASTRASOC_AUTO_MIGRATE=true``
+      run ``alembic upgrade head``; otherwise refuse to start on a schema
+      that is not at the latest migration.
+    * demo / development / test: ``create_all`` for zero-setup startup.
+    """
     from . import models  # noqa: F401  (ensures all models are registered)
 
+    if settings.is_production:
+        if settings.auto_migrate:
+            from alembic import command
+
+            command.upgrade(_alembic_config(), "head")
+        elif not schema_is_current():
+            raise RuntimeError("Database schema is not at the latest migration. Run "
+                               "`alembic upgrade head` or set ASTRASOC_AUTO_MIGRATE=true.")
+        return
     Base.metadata.create_all(bind=engine)

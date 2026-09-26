@@ -185,3 +185,39 @@ def test_html_export_escapes_content(client, t3, manager):
     body = client.get(f"/api/v1/reports/{rep['id']}/export?format=html", headers=manager).text
     assert "<script>alert(1)</script>" not in body
     assert "&lt;script&gt;" in body
+
+
+# --- Production guard & HTTP hardening ------------------------------------------
+def test_production_guard_rejects_unsafe_configuration():
+    from astrasoc.config import Settings, production_problems
+
+    weak = Settings(environment="production", jwt_secret="change-me", database_url="sqlite:///x.db",
+                    cors_origins="*")
+    problems = " ".join(production_problems(weak))
+    for needle in ("JWT_SECRET", "AUDIT_KEY", "SQLite", "CORS"):
+        assert needle in problems
+    strong = Settings(environment="production", jwt_secret="x" * 20 + "Qz9#" + "y" * 20,
+                      audit_key="a" * 20 + "Kp2!" + "b" * 20,
+                      database_url="postgresql+psycopg2://u@h/db", cors_origins="https://soc.example.com")
+    assert production_problems(strong) == []
+
+
+def test_production_never_seeds_demo_users():
+    from astrasoc.config import Settings
+
+    assert Settings(environment="production").should_seed_demo_users is False
+    assert Settings(environment="demo").should_seed_demo_users is True
+
+
+def test_security_headers_present(client, manager):
+    r = client.get("/api/v1/incidents", headers=manager)
+    for h in ("x-content-type-options", "x-frame-options", "content-security-policy",
+              "referrer-policy", "cache-control", "x-request-id"):
+        assert h in r.headers, h
+    assert r.headers["cache-control"] == "no-store"
+
+
+def test_oversized_body_rejected(client, manager):
+    r = client.post("/api/v1/incidents/x/notes", headers={**manager, "content-length": str(6 * 1024 * 1024)},
+                    content=b"{}")
+    assert r.status_code == 413

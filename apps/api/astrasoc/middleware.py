@@ -1,6 +1,8 @@
-"""Cross-cutting HTTP middleware: request IDs and a simple rate limiter."""
+"""Cross-cutting HTTP middleware: client IP, request IDs, security headers,
+body-size limit and a per-client rate limiter."""
 from __future__ import annotations
 
+import ipaddress
 import time
 import uuid
 from collections import defaultdict, deque
@@ -11,11 +13,53 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from .config import settings
 
+MAX_BODY_BYTES = 5 * 1024 * 1024
+
+
+def _trusted_networks() -> list[ipaddress._BaseNetwork]:
+    nets = []
+    for part in settings.trusted_proxies.split(","):
+        part = part.strip()
+        if part:
+            try:
+                nets.append(ipaddress.ip_network(part, strict=False))
+            except ValueError:
+                continue
+    return nets
+
+
+_TRUSTED = _trusted_networks()
+
+
+def client_ip(request: Request) -> str:
+    """The real client address. ``X-Forwarded-For`` is honoured only when the
+    direct peer is a configured trusted proxy (otherwise it is spoofable)."""
+    peer = request.client.host if request.client else "unknown"
+    if not _TRUSTED:
+        return peer
+    try:
+        peer_ip = ipaddress.ip_address(peer)
+    except ValueError:
+        return peer
+    if not any(peer_ip in n for n in _TRUSTED):
+        return peer
+    chain = [h.strip() for h in request.headers.get("x-forwarded-for", "").split(",") if h.strip()]
+    # Walk from the right, skipping our own trusted proxies.
+    for hop in reversed(chain):
+        try:
+            if not any(ipaddress.ip_address(hop) in n for n in _TRUSTED):
+                return hop
+        except ValueError:
+            return peer
+    return peer
+
 
 class RequestIDMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
+        rid = request.headers.get("x-request-id", "")
+        request_id = rid if (rid and len(rid) <= 64 and rid.replace("-", "").isalnum()) else uuid.uuid4().hex
         request.state.request_id = request_id
+        request.state.client_ip = client_ip(request)
         start = time.perf_counter()
         response = await call_next(request)
         response.headers["x-request-id"] = request_id
@@ -23,12 +67,36 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
         return response
 
 
-class RateLimitMiddleware(BaseHTTPMiddleware):
-    """Fixed-window-ish sliding limiter keyed by client IP.
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        length = request.headers.get("content-length")
+        if length and length.isdigit() and int(length) > MAX_BODY_BYTES:
+            return JSONResponse(status_code=413, content={
+                "error": "payload_too_large", "message": f"Request body exceeds {MAX_BODY_BYTES} bytes."})
+        response = await call_next(request)
+        h = response.headers
+        h.setdefault("x-content-type-options", "nosniff")
+        h.setdefault("x-frame-options", "DENY")
+        h.setdefault("referrer-policy", "no-referrer")
+        h.setdefault("permissions-policy", "camera=(), microphone=(), geolocation=()")
+        h.setdefault("cross-origin-opener-policy", "same-origin")
+        if not request.url.path.startswith("/api/docs") and not request.url.path.startswith("/api/redoc"):
+            h.setdefault("content-security-policy", "default-src 'none'; frame-ancestors 'none'")
+        if request.url.path.startswith("/api/v1/") and request.url.path != "/api/v1/stream":
+            h.setdefault("cache-control", "no-store")
+        if settings.is_production:
+            h.setdefault("strict-transport-security", "max-age=31536000; includeSubDomains")
+        return response
 
-    In-memory (fine for demo/single-node). Production points this at Redis via
-    ASTRASOC_REDIS_URL; the interface is identical.
-    """
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """Sliding-window limiter keyed by client IP (in-memory, per process).
+
+    Authentication endpoints get a much tighter budget to slow credential
+    stuffing (on top of per-account lockout). Multi-replica deployments
+    should front this with the ingress controller's rate limiting."""
+
+    AUTH_PER_MINUTE = 20
 
     def __init__(self, app, per_minute: int | None = None) -> None:
         super().__init__(app)
@@ -36,21 +104,25 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self._hits: dict[str, deque[float]] = defaultdict(deque)
 
     async def dispatch(self, request: Request, call_next):
-        # Never rate-limit the health probe or the SSE stream.
-        if request.url.path in ("/health", "/api/v1/health/live", "/api/v1/stream"):
+        path = request.url.path
+        if path in ("/health", "/api/v1/health/live", "/api/v1/health/ready", "/api/v1/stream"):
             return await call_next(request)
-        client = request.client.host if request.client else "unknown"
+        ip = client_ip(request)
+        is_auth = path in ("/api/v1/auth/login", "/api/v1/auth/refresh")
+        key = f"auth:{ip}" if is_auth else ip
+        limit = self.AUTH_PER_MINUTE if is_auth and settings.environment != "test" else self.per_minute
         now = time.time()
-        window = self._hits[client]
+        window = self._hits[key]
         while window and window[0] < now - 60:
             window.popleft()
-        if len(window) >= self.per_minute:
+        if len(window) >= limit:
             return JSONResponse(
                 status_code=429,
-                content={"error": "rate_limited",
-                         "message": "Too many requests. Slow down.",
+                content={"error": "rate_limited", "message": "Too many requests. Slow down.",
                          "request_id": getattr(request.state, "request_id", None)},
                 headers={"retry-after": "10"},
             )
         window.append(now)
+        if len(self._hits) > 50_000:  # bound memory under scanning
+            self._hits.clear()
         return await call_next(request)

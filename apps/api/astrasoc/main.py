@@ -11,9 +11,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .config import settings
+from .config import production_problems, settings
 from .db import SessionLocal, init_db
-from .middleware import RateLimitMiddleware, RequestIDMiddleware
+from .middleware import RateLimitMiddleware, RequestIDMiddleware, SecurityHeadersMiddleware
 
 logging.basicConfig(level=settings.log_level)
 logger = logging.getLogger("astrasoc")
@@ -48,7 +48,13 @@ async def lifespan(app: FastAPI):
 
     bus.bind_loop(asyncio.get_running_loop())
 
-    # 1) Schema + baseline seed (idempotent).
+    # 1) Refuse unsafe production configuration, then schema + baseline seed.
+    if settings.is_production:
+        problems = production_problems(settings)
+        if problems:
+            for p in problems:
+                logger.critical("Refusing to start: %s", p)
+            raise RuntimeError("Unsafe production configuration: " + " | ".join(problems))
     init_db()
     from .seed.bootstrap import ensure_seed
     from .seed.engine import ensure_demo_estate_data, run_live_generator
@@ -90,13 +96,14 @@ app = FastAPI(
 )
 
 app.add_middleware(RateLimitMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["authorization", "content-type", "x-api-key", "x-tenant-id", "x-request-id"],
     expose_headers=["x-request-id", "x-response-time-ms"],
 )
 

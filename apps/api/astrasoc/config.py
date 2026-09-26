@@ -135,6 +135,31 @@ class Settings(BaseSettings):
         return self.database_url.startswith("sqlite")
 
 
+_WEAK_MARKERS = ("change-me", "changeme", "secret", "password", "example", "test")
+
+
+def production_problems(s: Settings) -> list[str]:
+    """Configuration that is unacceptable for a production deployment."""
+    problems: list[str] = []
+    secret = s.jwt_secret or ""
+    if len(secret) < 32 or any(m in secret.lower() for m in _WEAK_MARKERS):
+        problems.append("ASTRASOC_JWT_SECRET must be a random value of at least 32 characters.")
+    if not s.audit_key:
+        problems.append("ASTRASOC_AUDIT_KEY must be set (separate key for the audit chain).")
+    elif len(s.audit_key) < 32 or s.audit_key == secret:
+        problems.append("ASTRASOC_AUDIT_KEY must be >=32 chars and differ from the JWT secret.")
+    if s.is_sqlite and not s.allow_sqlite_in_production:
+        problems.append("SQLite is not supported in production; set ASTRASOC_DATABASE_URL to "
+                        "PostgreSQL (or ASTRASOC_ALLOW_SQLITE_IN_PRODUCTION=true for a pilot).")
+    if "*" in s.cors_origin_list:
+        problems.append("ASTRASOC_CORS_ORIGINS must list exact origins, not '*'.")
+    if s.seed_demo_users:
+        problems.append("ASTRASOC_SEED_DEMO_USERS must not be enabled in production.")
+    if s.allow_unsafe_secret_schemes:
+        problems.append("ASTRASOC_ALLOW_UNSAFE_SECRET_SCHEMES must be false in production.")
+    return problems
+
+
 @lru_cache
 def get_settings() -> Settings:
     return Settings()

@@ -7,9 +7,11 @@ import tempfile
 import pytest
 
 # Configure a throwaway DB and test mode BEFORE importing the app/settings.
+# ASTRASOC_TEST_DATABASE_URL runs the suite against e.g. PostgreSQL (the
+# schema is dropped and recreated); default is a throwaway SQLite file.
 _TMP = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 os.environ["ASTRASOC_ENVIRONMENT"] = "test"
-os.environ["ASTRASOC_DATABASE_URL"] = f"sqlite:///{_TMP.name}"
+os.environ["ASTRASOC_DATABASE_URL"] = os.environ.get("ASTRASOC_TEST_DATABASE_URL") or f"sqlite:///{_TMP.name}"
 os.environ["ASTRASOC_DEMO_SEED_ON_STARTUP"] = "true"
 os.environ["ASTRASOC_JWT_SECRET"] = "test-secret-please-change-to-a-long-value-32b+"
 
@@ -18,7 +20,13 @@ os.environ["ASTRASOC_JWT_SECRET"] = "test-secret-please-change-to-a-long-value-3
 def client():
     from fastapi.testclient import TestClient
 
+    from astrasoc.db import Base, engine
     from astrasoc.main import app
+
+    if os.environ.get("ASTRASOC_TEST_DATABASE_URL"):
+        import astrasoc.models  # noqa: F401
+
+        Base.metadata.drop_all(bind=engine)
 
     with TestClient(app) as c:
         yield c
