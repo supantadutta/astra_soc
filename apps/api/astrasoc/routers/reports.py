@@ -39,7 +39,7 @@ def list_reports(principal: Principal = Depends(require_permission("report:read"
                  db: Session = Depends(get_db),
                  page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=200),
                  report_type: str | None = None) -> dict:
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     filters = [Report.report_type == report_type] if report_type else []
     return paginate(db, Report, tenant_id=principal.tenant_id, scope=scope, filters=filters,
                     sort="created_at", page=page, page_size=page_size, exclude={"content"})
@@ -52,7 +52,7 @@ def create_report(payload: dict,
     report_type = payload.get("report_type")
     if report_type not in REPORT_TYPES:
         raise HTTPException(422, detail="Invalid report type")
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     incident_id = uuid.UUID(payload["incident_id"]) if payload.get("incident_id") else None
     report = generate_report(db, principal.tenant_id, report_type, scope,
                              incident_id=incident_id, generated_by=principal.user_id)

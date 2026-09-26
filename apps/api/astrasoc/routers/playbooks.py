@@ -32,7 +32,7 @@ def list_runs(principal: Principal = Depends(require_permission("playbook:read")
               db: Session = Depends(get_db),
               page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=200),
               status: str | None = None, incident_id: uuid.UUID | None = None) -> dict:
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     filters = []
     if status:
         filters.append(WorkflowRun.status == status)
@@ -106,7 +106,7 @@ def upsert_playbook(playbook_key: str, payload: dict,
 def run_playbook(playbook_key: str, payload: dict,
                  principal: Principal = Depends(require_permission("playbook:read")),
                  db: Session = Depends(get_db)) -> dict:
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     incident_id = uuid.UUID(payload["incident_id"]) if payload.get("incident_id") else None
     run = workflow.start_workflow(db, principal, playbook_key, incident_id, scope,
                                   idempotency_key=payload.get("idempotency_key"))

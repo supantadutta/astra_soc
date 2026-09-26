@@ -1,7 +1,10 @@
 """Backend-enforced DEMO / LIVE operating mode.
 
-The operating mode is a *server-side* state stored in ``SystemSetting`` — not a
-frontend toggle. Everything downstream reads it:
+The operating mode is a *server-side*, **per-tenant** state stored in
+``SystemSetting`` (``tenant_id`` + key ``operating_mode``) — not a frontend
+toggle. One tenant switching to LIVE never changes another tenant's mode. A
+platform-wide row (``tenant_id IS NULL``) acts as the default for tenants that
+have never switched. Everything downstream reads it:
 
 * Data queries filter by ``data_scope`` matching the current mode, so demo and
   live rows never mix.
@@ -12,6 +15,7 @@ frontend toggle. Everything downstream reads it:
 """
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -56,14 +60,17 @@ class ModeState:
         }
 
 
-def _get_setting(db: Session, key: str) -> SystemSetting | None:
+def _get_setting(db: Session, key: str, tenant_id: uuid.UUID | None = None) -> SystemSetting | None:
+    cond = SystemSetting.tenant_id.is_(None) if tenant_id is None else SystemSetting.tenant_id == tenant_id
     return db.execute(
-        select(SystemSetting).where(SystemSetting.tenant_id.is_(None), SystemSetting.key == key)
+        select(SystemSetting).where(cond, SystemSetting.key == key)
     ).scalar_one_or_none()
 
 
-def get_mode(db: Session) -> ModeState:
-    row = _get_setting(db, MODE_KEY)
+def get_mode(db: Session, tenant_id: uuid.UUID | None = None) -> ModeState:
+    row = _get_setting(db, MODE_KEY, tenant_id) if tenant_id is not None else None
+    if row is None:
+        row = _get_setting(db, MODE_KEY)
     if row is None:
         return ModeState(mode=settings.default_mode)
     v = row.value or {}
@@ -78,9 +85,9 @@ def get_mode(db: Session) -> ModeState:
     )
 
 
-def current_scope(db: Session) -> str:
-    """The ``data_scope`` value the current mode operates on."""
-    return "LIVE" if get_mode(db).is_live else "DEMO"
+def current_scope(db: Session, tenant_id: uuid.UUID | None = None) -> str:
+    """The ``data_scope`` value the tenant's current mode operates on."""
+    return "LIVE" if get_mode(db, tenant_id).is_live else "DEMO"
 
 
 @dataclass
@@ -91,7 +98,7 @@ class ReadinessCheck:
     required: bool = True
 
 
-def live_readiness(db: Session) -> list[ReadinessCheck]:
+def live_readiness(db: Session, tenant_id: uuid.UUID) -> list[ReadinessCheck]:
     """Checks that must pass before activating LIVE mode.
 
     These are honest checks against real configuration — they do not fabricate
@@ -107,7 +114,8 @@ def live_readiness(db: Session) -> list[ReadinessCheck]:
 
     # At least one enabled, non-mock connector must exist to have real data.
     live_connectors = db.execute(
-        select(Connector).where(Connector.enabled.is_(True), Connector.use_mock.is_(False))
+        select(Connector).where(Connector.tenant_id == tenant_id, Connector.enabled.is_(True),
+                                Connector.use_mock.is_(False))
     ).scalars().all()
     checks.append(ReadinessCheck(
         "live_connector_configured",
@@ -129,14 +137,19 @@ def live_readiness(db: Session) -> list[ReadinessCheck]:
     # A configured (non-simulated) model provider OR AI explicitly disabled.
     providers = db.execute(
         select(ModelProvider).where(
+            ModelProvider.tenant_id == tenant_id,
             ModelProvider.enabled.is_(True), ModelProvider.kind != "simulated"
         )
     ).scalars().all()
+    state = get_mode(db, tenant_id)
+    ai_off = (not state.ai_enabled) or state.llm_strategy in ("disabled", "simulated")
     checks.append(ReadinessCheck(
-        "ai_configuration", True,
+        "ai_configuration", bool(providers) or ai_off,
         f"{len(providers)} real provider(s) configured."
         if providers else
-        "No real LLM provider — live mode will run with AI in simulated/disabled fallback.",
+        ("AI is disabled/simulated for this tenant — the deterministic pipeline runs without an LLM."
+         if ai_off else
+         "No real LLM provider configured while a hosted/private strategy is selected."),
         required=False,
     ))
 
@@ -145,6 +158,7 @@ def live_readiness(db: Session) -> list[ReadinessCheck]:
 
 def set_mode(
     db: Session,
+    tenant_id: uuid.UUID,
     mode: str,
     changed_by: str,
     *,
@@ -156,8 +170,8 @@ def set_mode(
     if mode == "LIVE" and not settings.allow_live_mode:
         raise PermissionError("Live mode is disabled for this deployment.")
 
-    row = _get_setting(db, MODE_KEY)
-    prev = row.value if row else {}
+    row = _get_setting(db, MODE_KEY, tenant_id)
+    prev = (row.value if row else None) or (get_mode(db, tenant_id).to_dict())
     value = {
         "mode": mode,
         "changed_at": datetime.now(UTC).isoformat(),
@@ -168,23 +182,24 @@ def set_mode(
         "degraded_reasons": [],
     }
     if row is None:
-        row = SystemSetting(tenant_id=None, key=MODE_KEY, value=value,
+        row = SystemSetting(tenant_id=tenant_id, key=MODE_KEY, value=value,
                             description="Authoritative operating mode (DEMO/LIVE).")
         db.add(row)
     else:
         row.value = value
     db.flush()
-    return get_mode(db)
+    return get_mode(db, tenant_id)
 
 
-def mark_degraded(db: Session, reasons: list[str]) -> ModeState:
-    """Return to safe degraded operation if critical dependencies fail."""
-    row = _get_setting(db, MODE_KEY)
+def mark_degraded(db: Session, tenant_id: uuid.UUID, reasons: list[str]) -> ModeState:
+    """Record (or clear) degraded operation for a tenant; shown in the UI header."""
+    row = _get_setting(db, MODE_KEY, tenant_id)
     if row is None:
-        return get_mode(db)
+        set_mode(db, tenant_id, get_mode(db, tenant_id).mode, changed_by="system")
+        row = _get_setting(db, MODE_KEY, tenant_id)
     v = dict(row.value or {})
     v["degraded"] = bool(reasons)
     v["degraded_reasons"] = reasons
     row.value = v
     db.flush()
-    return get_mode(db)
+    return get_mode(db, tenant_id)

@@ -16,7 +16,8 @@ PERMISSIONS: dict[str, str] = {
     "incident:write": "Create and modify incidents",
     "incident:assign": "Assign incident ownership",
     "evidence:read": "View evidence",
-    "evidence:write": "Add / promote evidence",
+    "evidence:write": "Add analyst conclusions / assumptions / notes",
+    "evidence:attest": "Attest a CONFIRMED_FACT with a verifiable source reference",
     "entity:read": "View entities and graph",
     # Investigation / AI
     "agent:read": "View agents and runs",
@@ -37,6 +38,7 @@ PERMISSIONS: dict[str, str] = {
     # Response / governance
     "playbook:read": "View playbooks",
     "playbook:write": "Author playbooks",
+    "playbook:run": "Start and advance playbook workflow runs",
     "action:request": "Request response actions",
     "action:execute": "Execute approved response actions",
     "approval:read": "View approvals",
@@ -55,7 +57,8 @@ PERMISSIONS: dict[str, str] = {
     "audit:read": "Read audit logs",
     "rbac:manage": "Manage roles and assignments",
     "user:manage": "Manage users and API keys",
-    "tenant:manage": "Manage tenants",
+    "tenant:manage": "Manage the caller's own tenant settings",
+    "platform:admin": "Cross-tenant platform administration (tenants, global agents/tools)",
     "settings:manage": "Manage system settings",
     "mode:manage": "Switch demo/live operating mode",
     "demo:manage": "Control demo scenarios and reseed",
@@ -78,17 +81,17 @@ TIER1 = READ_ANALYST + ["alert:write", "incident:write", "feedback:write", "agen
 
 TIER2 = TIER1 + [
     "evidence:write", "incident:assign", "action:request", "report:generate",
-    "threatintel:write", "knowledge:write",
+    "threatintel:write", "knowledge:write", "playbook:run",
 ]
 
-TIER3 = TIER2 + ["detection:write", "playbook:write", "action:execute"]
+TIER3 = TIER2 + ["detection:write", "playbook:write", "action:execute", "evidence:attest"]
+
+# Permissions that act across tenants. Only platform administrators hold them.
+PLATFORM_PERMISSIONS = {"platform:admin"}
 
 BUILTIN_ROLES: dict[str, list[str]] = {
     "platform_super_admin": [WILDCARD],
-    "tenant_admin": [
-        p for p in PERMISSIONS
-        if not p.startswith("tenant:")
-    ] + ["tenant:manage"],
+    "tenant_admin": [p for p in PERMISSIONS if p not in PLATFORM_PERMISSIONS],
     "soc_manager": TIER3 + [
         "approval:decide", "detection:approve", "policy:read", "rbac:manage",
         "demo:manage", "evaluation:manage", "connector:manage", "mode:manage",
@@ -115,7 +118,7 @@ BUILTIN_ROLES: dict[str, list[str]] = {
         "connector:read", "query:run",
     ],
     "automation_service_account": [
-        "incident:read", "agent:run", "action:request", "playbook:read",
+        "incident:read", "agent:run", "action:request", "playbook:read", "playbook:run",
         "query:run", "report:generate",
     ],
 }
@@ -136,6 +139,52 @@ ROLE_DESCRIPTIONS = {
     "integration_service_account": "Machine identity for ingestion connectors.",
     "automation_service_account": "Machine identity for automation/playbooks.",
 }
+
+
+# Roles that only exist in the platform (operator) tenant.
+PLATFORM_ONLY_ROLES = {"platform_super_admin"}
+
+# Approval authority: which roles satisfy an approval that requires role X.
+APPROVAL_AUTHORITY: dict[str, set[str]] = {
+    "incident_commander": {"incident_commander", "soc_manager", "tenant_admin"},
+    "soc_manager": {"soc_manager", "tenant_admin"},
+    "tenant_admin": {"tenant_admin"},
+}
+
+
+def is_known_permission(perm: str) -> bool:
+    if perm == WILDCARD or perm in PERMISSIONS:
+        return True
+    if perm.endswith(":*"):
+        resource = perm[:-2]
+        return any(p.split(":", 1)[0] == resource for p in PERMISSIONS)
+    return False
+
+
+def grant_violations(granter_permissions: list[str], requested: list[str]) -> list[str]:
+    """Return the requested permissions the granter may NOT hand out.
+
+    A principal can only grant permissions it holds itself (no escalation),
+    unknown permission strings are rejected, and the wildcard / platform
+    permissions can only be granted by a platform administrator.
+    """
+    is_platform = role_has_permission(granter_permissions, "platform:admin")
+    bad: list[str] = []
+    for perm in requested:
+        if not is_known_permission(perm):
+            bad.append(perm)
+        elif perm == WILDCARD or perm in PLATFORM_PERMISSIONS or perm == "platform:*":
+            if not is_platform:
+                bad.append(perm)
+        elif perm.endswith(":*"):
+            resource = perm[:-2]
+            covered = all(role_has_permission(granter_permissions, p)
+                          for p in PERMISSIONS if p.split(":", 1)[0] == resource)
+            if not covered:
+                bad.append(perm)
+        elif not role_has_permission(granter_permissions, perm):
+            bad.append(perm)
+    return bad
 
 
 def role_has_permission(permissions: list[str], required: str) -> bool:

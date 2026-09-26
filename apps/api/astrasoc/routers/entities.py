@@ -25,7 +25,7 @@ def list_entities(
     page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=200),
     kind: str | None = None, q: str | None = None, sort: str | None = None, order: str = "desc",
 ) -> dict:
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     filters = [Entity.kind == kind] if kind else []
     return paginate(db, Entity, tenant_id=principal.tenant_id, scope=scope, filters=filters,
                     search=q, search_fields=["value", "display_name"],
@@ -39,7 +39,7 @@ def entity_graph(
     incident_id: uuid.UUID | None = None, limit: int = Query(300, le=1000),
 ) -> dict:
     """Nodes + edges for the entity graph / attack-path explorer."""
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     rq = select(EntityRelationship).where(
         EntityRelationship.tenant_id == principal.tenant_id,
         EntityRelationship.data_scope == scope)
@@ -65,7 +65,7 @@ def attack_paths(
     incident_id: uuid.UUID | None = None,
 ) -> dict:
     """Derive simple attack paths (chains toward high-criticality assets)."""
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     rq = select(EntityRelationship).where(
         EntityRelationship.tenant_id == principal.tenant_id,
         EntityRelationship.data_scope == scope)
@@ -109,7 +109,7 @@ def attack_paths(
 def get_entity(entity_id: uuid.UUID,
                principal: Principal = Depends(require_permission("entity:read")),
                db: Session = Depends(get_db)) -> dict:
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     e = db.get(Entity, entity_id)
     if not e or e.tenant_id != principal.tenant_id or e.data_scope != scope:
         raise HTTPException(404, detail="Entity not found")

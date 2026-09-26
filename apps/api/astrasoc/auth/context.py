@@ -18,6 +18,11 @@ class Principal:
     is_service_account: bool = False
     allowed_classifications: list[str] = field(default_factory=list)
     session_id: str | None = None
+    tenant_slug: str = ""
+
+    @property
+    def is_platform_admin(self) -> bool:
+        return self.has("platform:admin")
 
     def has(self, permission: str) -> bool:
         return role_has_permission(self.permissions, permission)

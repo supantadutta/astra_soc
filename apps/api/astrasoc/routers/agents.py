@@ -35,7 +35,7 @@ def list_runs(
     agent_key: str | None = None, status: str | None = None,
     incident_id: uuid.UUID | None = None,
 ) -> dict:
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     filters = []
     if agent_key:
         filters.append(AgentRun.agent_key == agent_key)
@@ -90,7 +90,7 @@ def run_agent(agent_key: str, payload: dict,
               principal: Principal = Depends(require_permission("agent:run")),
               db: Session = Depends(get_db)) -> dict:
     """Invoke a single bounded agent on an incident."""
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     incident_id = uuid.UUID(payload["incident_id"]) if payload.get("incident_id") else None
     run = orchestrator.run_agent(db, principal.tenant_id, agent_key, incident_id, scope,
                                  actor_label=principal.email)

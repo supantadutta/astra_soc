@@ -2,7 +2,7 @@
 
 
 def test_default_mode_is_demo(client, manager):
-    assert client.get("/api/v1/mode").json()["mode"] == "DEMO"
+    assert client.get("/api/v1/mode", headers=manager).json()["mode"] == "DEMO"
 
 
 def test_live_switch_requires_confirmation_and_readiness(client, admin):

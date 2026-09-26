@@ -30,7 +30,7 @@ def list_alerts(
     severity: str | None = None, status: str | None = None, source: str | None = None,
     q: str | None = None, sort: str | None = None, order: str = "desc",
 ) -> dict:
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     filters = []
     if severity:
         filters.append(Alert.severity == severity)
@@ -47,7 +47,7 @@ def list_alerts(
 def get_alert(alert_id: uuid.UUID,
               principal: Principal = Depends(require_permission("alert:read")),
               db: Session = Depends(get_db)) -> dict:
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     a = db.get(Alert, alert_id)
     if not a or a.tenant_id != principal.tenant_id or a.data_scope != scope:
         raise HTTPException(404, detail="Alert not found")
@@ -58,7 +58,7 @@ def get_alert(alert_id: uuid.UUID,
 def acknowledge(alert_id: uuid.UUID,
                 principal: Principal = Depends(require_permission("alert:write")),
                 db: Session = Depends(get_db)) -> dict:
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     a = db.get(Alert, alert_id)
     if not a or a.tenant_id != principal.tenant_id or a.data_scope != scope:
         raise HTTPException(404, detail="Alert not found")
@@ -76,7 +76,7 @@ def acknowledge(alert_id: uuid.UUID,
 def update_alert(alert_id: uuid.UUID, payload: dict,
                  principal: Principal = Depends(require_permission("alert:write")),
                  db: Session = Depends(get_db)) -> dict:
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     a = db.get(Alert, alert_id)
     if not a or a.tenant_id != principal.tenant_id or a.data_scope != scope:
         raise HTTPException(404, detail="Alert not found")
@@ -92,7 +92,7 @@ def promote_to_incident(alert_id: uuid.UUID,
                         principal: Principal = Depends(require_permission("incident:write")),
                         db: Session = Depends(get_db)) -> dict:
     """Create a new incident from an alert (or attach to an existing one)."""
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     a = db.get(Alert, alert_id)
     if not a or a.tenant_id != principal.tenant_id or a.data_scope != scope:
         raise HTTPException(404, detail="Alert not found")
@@ -131,7 +131,7 @@ def promote_to_incident(alert_id: uuid.UUID,
 def facets(principal: Principal = Depends(require_permission("alert:read")),
            db: Session = Depends(get_db)) -> dict:
     """Distinct values for building filter UIs."""
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     from sqlalchemy import func
     def distinct(col):
         return [r[0] for r in db.execute(

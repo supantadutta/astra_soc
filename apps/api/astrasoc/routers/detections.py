@@ -94,7 +94,7 @@ def replay(rule_id: uuid.UUID,
     r = db.get(DetectionRule, rule_id)
     if not r or r.tenant_id != principal.tenant_id:
         raise HTTPException(404, detail="Rule not found")
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     result = replay_rule(db, principal.tenant_id, r, scope)
     r.last_triggered_at = datetime.now(UTC) if result["matches"] else r.last_triggered_at
     r.trigger_count = (r.trigger_count or 0) + result["matches"]
@@ -138,7 +138,7 @@ def execute_query(payload: dict,
     ok, reason = is_read_only(query)
     if not ok:
         raise HTTPException(400, detail={"error": "destructive_query", "message": reason})
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     from ..models import SecurityEvent
     rows = db.execute(select(SecurityEvent).where(
         SecurityEvent.tenant_id == principal.tenant_id,

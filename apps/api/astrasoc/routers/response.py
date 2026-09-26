@@ -24,7 +24,7 @@ def list_actions(principal: Principal = Depends(require_permission("approval:rea
                  db: Session = Depends(get_db),
                  page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=200),
                  status: str | None = None, incident_id: uuid.UUID | None = None) -> dict:
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     filters = []
     if status:
         filters.append(ResponseAction.status == status)
@@ -41,7 +41,7 @@ def create_action(payload: dict,
     """Request a response action. Runs the full safety pipeline (schema,
     evidence, confidence, criticality, blast radius, RBAC, policy, approval
     determination). Never executes here."""
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     try:
         action = gateway.create_action(
             db, principal, scope=scope, action_type=payload["action_type"],

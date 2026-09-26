@@ -72,6 +72,56 @@ class Settings(BaseSettings):
 
     # --- Rate limiting ----------------------------------------------------
     rate_limit_per_minute: int = 600
+    # Only honour X-Forwarded-For when the direct peer is one of these proxies
+    # (comma-separated IPs/CIDRs), e.g. the ingress controller.
+    trusted_proxies: str = ""
+
+    # --- Bootstrap / seeding ---------------------------------------------
+    # Demo accounts (well-known password) are created only when this is true.
+    # Default: on for demo/development/test, OFF for production.
+    seed_demo_users: bool | None = None
+    # First administrator for a production deployment (created once, when the
+    # database has no users). The password must satisfy the password policy.
+    bootstrap_admin_email: str | None = None
+    bootstrap_admin_password: str | None = None
+    # Run `alembic upgrade head` on startup instead of create_all (production).
+    auto_migrate: bool = False
+    # Production refuses SQLite unless explicitly allowed (single-node pilots).
+    allow_sqlite_in_production: bool = False
+
+    # --- Secrets ------------------------------------------------------------
+    # env:// and file:// secret references read arbitrary process env / files,
+    # so tenant-configurable references may only use vault:// unless an
+    # operator explicitly enables these schemes.
+    allow_unsafe_secret_schemes: bool = False
+    # Separate HMAC key for the audit chain (falls back to jwt_secret).
+    audit_key: str | None = None
+
+    # --- Outbound egress policy (connectors + LLM providers) -------------
+    # Link-local / cloud-metadata targets are always blocked.
+    egress_allow_private_networks: bool = True   # on-prem SIEM/EDR often live here
+    egress_allow_loopback: bool = False
+    # Optional comma-separated host allowlist (exact host or ".suffix").
+    egress_host_allowlist: str = ""
+
+    # --- Accounts -------------------------------------------------------
+    login_max_failures: int = 5
+    login_lockout_minutes: int = 15
+    password_min_length: int = 12
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment == "production"
+
+    @property
+    def should_seed_demo_users(self) -> bool:
+        if self.seed_demo_users is not None:
+            return self.seed_demo_users
+        return self.environment in ("demo", "development", "test")
+
+    @property
+    def audit_signing_key(self) -> str:
+        return self.audit_key or self.jwt_secret
 
     @property
     def cors_origin_list(self) -> list[str]:

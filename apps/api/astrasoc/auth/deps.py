@@ -1,6 +1,7 @@
 """FastAPI dependencies for authentication and authorization."""
 from __future__ import annotations
 
+import hmac
 import uuid
 from datetime import UTC, datetime
 
@@ -10,8 +11,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import APIKey, Role, User, UserRole
+from ..models import APIKey, Role, Tenant, User, UserRole
+from ..models import Session as SessionModel
 from .context import Principal
+from .permissions import role_has_permission
 from .security import decode_token, hash_token
 
 
@@ -33,8 +36,27 @@ def _effective_permissions(db: Session, user: User) -> tuple[list[str], list[str
     return sorted(perms), roles
 
 
-def _principal_from_user(db: Session, user: User, session_id: str | None = None) -> Principal:
+def _unauthorized(message: str) -> HTTPException:
+    return HTTPException(status.HTTP_401_UNAUTHORIZED,
+                         detail={"error": "unauthorized", "message": message},
+                         headers={"WWW-Authenticate": "Bearer"})
+
+
+def _check_tenant_active(db: Session, tenant_id: uuid.UUID) -> Tenant:
+    tenant = db.get(Tenant, tenant_id)
+    if tenant is None or not tenant.is_active:
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            detail={"error": "tenant_inactive", "message": "Tenant is disabled."})
+    return tenant
+
+
+def _principal_from_user(db: Session, user: User, session_id: str | None = None,
+                         scopes: list[str] | None = None) -> Principal:
     perms, roles = _effective_permissions(db, user)
+    tenant = _check_tenant_active(db, user.tenant_id)
+    if scopes:
+        # A scoped API key can never exceed its owner's current permissions.
+        perms = sorted(p for p in scopes if role_has_permission(perms, p))
     return Principal(
         user_id=user.id,
         tenant_id=user.tenant_id,
@@ -47,6 +69,7 @@ def _principal_from_user(db: Session, user: User, session_id: str | None = None)
             "allowed_classifications", ["public", "internal", "confidential"]
         ),
         session_id=session_id,
+        tenant_slug=tenant.slug,
     )
 
 
@@ -63,44 +86,48 @@ def get_current_principal(
         key = db.execute(
             select(APIKey).where(APIKey.prefix == prefix, APIKey.revoked_at.is_(None))
         ).scalar_one_or_none()
-        if key and hash_token(x_api_key) == key.key_hash:
+        if key and hmac.compare_digest(hash_token(x_api_key), key.key_hash):
             if key.expires_at and key.expires_at < datetime.now(UTC):
-                raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="API key expired")
-            key.last_used_at = datetime.now(UTC)
+                raise _unauthorized("API key expired")
             user = db.get(User, key.user_id) if key.user_id else None
-            if user is None:
-                # Scope-only key without a user — synthesize a service principal.
-                return Principal(
-                    user_id=key.id, tenant_id=key.tenant_id,
-                    email=f"{key.prefix}@service", full_name=key.name,
-                    roles=["service"], permissions=key.scopes or [],
-                    is_service_account=True,
-                )
+            if user is None or not user.is_active:
+                raise _unauthorized("API key owner is missing or disabled")
+            key.last_used_at = datetime.now(UTC)
             db.flush()
-            return _principal_from_user(db, user)
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
+            return _principal_from_user(db, user, scopes=key.scopes or None)
+        raise _unauthorized("Invalid API key")
 
     # 2) Bearer JWT (interactive users).
     if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(
-            status.HTTP_401_UNAUTHORIZED,
-            detail={"error": "unauthorized", "message": "Missing bearer token"},
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise _unauthorized("Missing bearer token")
     token = authorization.split(" ", 1)[1].strip()
     try:
         payload = decode_token(token)
     except jwt.ExpiredSignatureError:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Token expired")
+        raise _unauthorized("Token expired")
     except jwt.PyJWTError:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+        raise _unauthorized("Invalid token")
     if payload.get("type") != "access":
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Wrong token type")
+        raise _unauthorized("Wrong token type")
+    try:
+        user_id = uuid.UUID(str(payload.get("sub")))
+    except ValueError:
+        raise _unauthorized("Invalid token subject")
 
-    user = db.get(User, uuid.UUID(payload["sub"]))
+    # Every access token is bound to a live session; logout / revocation /
+    # refresh-token theft detection immediately invalidates it.
+    sid = payload.get("sid")
+    if not sid:
+        raise _unauthorized("Token is not bound to a session")
+    sess = db.execute(select(SessionModel).where(
+        SessionModel.sid == sid, SessionModel.user_id == user_id)).scalar_one_or_none()
+    if sess is None or sess.revoked_at is not None or sess.expires_at < datetime.now(UTC):
+        raise _unauthorized("Session revoked or expired")
+
+    user = db.get(User, user_id)
     if user is None or not user.is_active:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
-    return _principal_from_user(db, user, session_id=payload.get("sid"))
+        raise _unauthorized("User not found or inactive")
+    return _principal_from_user(db, user, session_id=sid)
 
 
 def require_permission(permission: str):

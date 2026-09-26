@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -18,6 +19,8 @@ from ..services.mode import current_scope, get_mode, live_readiness, set_mode
 
 router = APIRouter(prefix="/api/v1", tags=["system"])
 
+LLM_STRATEGIES = {"simulated", "private", "hosted", "hybrid", "disabled"}
+
 
 @router.get("/health/live")
 def liveness() -> dict:
@@ -25,7 +28,7 @@ def liveness() -> dict:
 
 
 @router.get("/health/ready")
-def readiness(db: Session = Depends(get_db)) -> dict:
+def readiness(db: Session = Depends(get_db)):
     """Dependency health. Reports real state — unconfigured deps say so."""
     deps = []
 
@@ -34,8 +37,9 @@ def readiness(db: Session = Depends(get_db)) -> dict:
         db.execute(select(func.count()).select_from(Alert))
         deps.append({"name": "database", "state": "healthy",
                      "kind": "sqlite" if settings.is_sqlite else "postgresql", "required": True})
-    except Exception as exc:  # pragma: no cover
-        deps.append({"name": "database", "state": "unhealthy", "error": str(exc), "required": True})
+    except Exception:  # pragma: no cover
+        deps.append({"name": "database", "state": "unhealthy", "required": True,
+                     "detail": "Database query failed."})
 
     optional = [
         ("redis", settings.redis_url), ("clickhouse", settings.clickhouse_url),
@@ -52,17 +56,19 @@ def readiness(db: Session = Depends(get_db)) -> dict:
         })
 
     required_ok = all(d["state"] == "healthy" for d in deps if d.get("required"))
-    return {
-        "status": "ok" if required_ok else "degraded",
-        "mode": get_mode(db).to_dict(),
+    body = {
+        "status": "ok" if required_ok else "unavailable",
         "dependencies": deps,
         "event_bus": {"subscribers": bus.subscriber_count, "published": bus.total_published},
     }
+    # Orchestrators act on the status code: 503 takes the pod out of rotation.
+    return JSONResponse(status_code=200 if required_ok else 503, content=body)
 
 
 @router.get("/mode")
-def read_mode(db: Session = Depends(get_db)) -> dict:
-    return get_mode(db).to_dict()
+def read_mode(principal: Principal = Depends(get_current_principal),
+              db: Session = Depends(get_db)) -> dict:
+    return get_mode(db, principal.tenant_id).to_dict()
 
 
 @router.get("/mode/readiness")
@@ -70,7 +76,7 @@ def read_readiness(
     principal: Principal = Depends(require_permission("mode:manage")),
     db: Session = Depends(get_db),
 ) -> dict:
-    checks = live_readiness(db)
+    checks = live_readiness(db, principal.tenant_id)
     required_failed = [c.name for c in checks if c.required and not c.passed]
     return {
         "ready": len(required_failed) == 0,
@@ -103,7 +109,7 @@ def switch_mode(
                 "error": "confirmation_required",
                 "message": "Switching to LIVE requires confirm=true after reviewing readiness.",
             })
-        checks = live_readiness(db)
+        checks = live_readiness(db, principal.tenant_id)
         failed = [c.name for c in checks if c.required and not c.passed]
         if failed:
             raise HTTPException(400, detail={
@@ -112,10 +118,13 @@ def switch_mode(
                 "failed": failed,
             })
 
+    llm_strategy = payload.get("llm_strategy")
+    if llm_strategy is not None and llm_strategy not in LLM_STRATEGIES:
+        raise HTTPException(422, detail=f"llm_strategy must be one of {sorted(LLM_STRATEGIES)}")
     state = set_mode(
-        db, target, changed_by=principal.email,
+        db, principal.tenant_id, target, changed_by=principal.email,
         ai_enabled=payload.get("ai_enabled"),
-        llm_strategy=payload.get("llm_strategy"),
+        llm_strategy=llm_strategy,
     )
     audit.record(db, action="mode.switch", actor_id=principal.user_id,
                  tenant_id=principal.tenant_id, actor_label=principal.email,
@@ -130,7 +139,7 @@ def system_summary(
     principal: Principal = Depends(get_current_principal),
     db: Session = Depends(get_db),
 ) -> dict:
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     incidents = db.execute(
         select(func.count()).select_from(Incident).where(
             Incident.tenant_id == principal.tenant_id, Incident.data_scope == scope)
@@ -148,7 +157,7 @@ def system_summary(
             ModelProvider.tenant_id == principal.tenant_id, ModelProvider.enabled.is_(True))
     ).scalar() or 0
     return {
-        "mode": get_mode(db).to_dict(),
+        "mode": get_mode(db, principal.tenant_id).to_dict(),
         "scope": scope,
         "counts": {"incidents": incidents, "alerts": alerts,
                    "enabled_connectors": connectors, "enabled_providers": providers},

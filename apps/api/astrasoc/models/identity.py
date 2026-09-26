@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..db import GUID, Base
@@ -37,6 +37,10 @@ class User(UUIDMixin, TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_service_account: Mapped[bool] = mapped_column(Boolean, default=False)
     last_login_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    # Brute-force protection.
+    failed_login_count: Mapped[int] = mapped_column(Integer, default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(nullable=True)
+    password_changed_at: Mapped[datetime | None] = mapped_column(nullable=True)
     # ABAC attributes (e.g. clearance, allowed data classifications).
     attributes: Mapped[dict] = mapped_column(default=dict)
 
@@ -97,7 +101,15 @@ class Session(UUIDMixin, TimestampMixin, Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         GUID, ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
+    # Session id carried in access tokens ("sid"); revoking the session
+    # invalidates every access token issued for it.
+    sid: Mapped[str] = mapped_column(String(64), index=True, default="")
     refresh_token_hash: Mapped[str] = mapped_column(String(255), index=True)
+    # Refresh tokens rotate on every use; presenting a superseded token is
+    # treated as theft and revokes the session.
+    previous_token_hash: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    revoked_reason: Mapped[str | None] = mapped_column(String(80), nullable=True)
     ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
     user_agent: Mapped[str | None] = mapped_column(String(400), nullable=True)
     expires_at: Mapped[datetime] = mapped_column()

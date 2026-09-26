@@ -38,7 +38,7 @@ def _mins(a: datetime | None, b: datetime | None) -> float | None:
 @router.get("/overview")
 def overview(principal: Principal = Depends(require_permission("incident:read")),
              db: Session = Depends(get_db)) -> dict:
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     tid = principal.tenant_id
     incidents = db.execute(select(Incident).where(
         Incident.tenant_id == tid, Incident.data_scope == scope)).scalars().all()
@@ -83,7 +83,7 @@ def overview(principal: Principal = Depends(require_permission("incident:read"))
     connectors = db.execute(select(Connector).where(Connector.tenant_id == tid)).scalars().all()
 
     return {
-        "mode": get_mode(db).to_dict(),
+        "mode": get_mode(db, principal.tenant_id).to_dict(),
         "scope": scope,
         "kpis": {
             "global_risk_score": risk,
@@ -134,7 +134,7 @@ def _top_assets(active):
 @router.get("/trends")
 def trends(principal: Principal = Depends(require_permission("incident:read")),
            db: Session = Depends(get_db), days: int = 14) -> dict:
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     incidents = db.execute(select(Incident).where(
         Incident.tenant_id == principal.tenant_id, Incident.data_scope == scope)).scalars().all()
     buckets: dict[str, dict] = {}
@@ -153,7 +153,7 @@ def trends(principal: Principal = Depends(require_permission("incident:read")),
 @router.get("/live-events")
 def live_events(principal: Principal = Depends(require_permission("incident:read")),
                 db: Session = Depends(get_db), limit: int = 30) -> dict:
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     events = bus.recent(scope, limit=limit)
     return {"events": [{"type": e.type, "ts": e.ts, **e.data} for e in events]}
 
@@ -171,7 +171,7 @@ def platform_health(principal: Principal = Depends(require_permission("health:re
     failed_actions = db.execute(select(func.count()).select_from(ResponseAction).where(
         ResponseAction.tenant_id == tid, ResponseAction.status == "failed")).scalar() or 0
     return {
-        "mode": get_mode(db).to_dict(),
+        "mode": get_mode(db, principal.tenant_id).to_dict(),
         "services": [
             {"name": "api", "state": "healthy"},
             {"name": "database", "state": "healthy",

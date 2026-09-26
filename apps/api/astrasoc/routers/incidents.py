@@ -43,7 +43,7 @@ def list_incidents(
     severity: str | None = None, status: str | None = None, scenario: str | None = None,
     q: str | None = None, sort: str | None = None, order: str = "desc",
 ) -> dict:
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     filters = []
     if severity:
         filters.append(Incident.severity == severity)
@@ -68,7 +68,7 @@ def get_incident(incident_id: uuid.UUID,
                  principal: Principal = Depends(require_permission("incident:read")),
                  db: Session = Depends(get_db)) -> dict:
     """Full workspace payload: everything needed to investigate the case."""
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     inc = _load_incident(db, principal, incident_id, scope)
 
     alerts = db.execute(select(Alert).where(Alert.incident_id == inc.id)).scalars().all()
@@ -128,7 +128,7 @@ def get_incident(incident_id: uuid.UUID,
 def update_incident(incident_id: uuid.UUID, payload: dict,
                     principal: Principal = Depends(require_permission("incident:write")),
                     db: Session = Depends(get_db)) -> dict:
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     inc = _load_incident(db, principal, incident_id, scope)
     now = datetime.now(UTC)
     for field in ("title", "summary", "severity", "status", "confidence", "business_risk", "tags"):
@@ -149,7 +149,7 @@ def update_incident(incident_id: uuid.UUID, payload: dict,
 def add_note(incident_id: uuid.UUID, payload: dict,
              principal: Principal = Depends(require_permission("incident:write")),
              db: Session = Depends(get_db)) -> dict:
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     inc = _load_incident(db, principal, incident_id, scope)
     note = payload.get("note", "").strip()
     if not note:
@@ -170,7 +170,7 @@ def add_evidence(incident_id: uuid.UUID, payload: dict,
                  db: Session = Depends(get_db)) -> dict:
     """Analyst-authored evidence. Defaults to ANALYST_CONCLUSION unless a kind is
     given; the UI must clearly distinguish this from confirmed facts."""
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     inc = _load_incident(db, principal, incident_id, scope)
     content = payload.get("content", "")
     ev = Evidence(
@@ -196,7 +196,7 @@ def promote_hypothesis(incident_id: uuid.UUID, hypothesis_id: uuid.UUID,
                        db: Session = Depends(get_db)) -> dict:
     """An analyst promotes an AI hypothesis to an analyst conclusion (evidence).
     This is the ONLY way a model inference becomes an analyst-backed conclusion."""
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     inc = _load_incident(db, principal, incident_id, scope)
     h = db.get(Hypothesis, hypothesis_id)
     if not h or h.incident_id != inc.id:
@@ -223,7 +223,7 @@ def investigate(incident_id: uuid.UUID,
                 principal: Principal = Depends(require_permission("agent:run")),
                 db: Session = Depends(get_db)) -> dict:
     """Run the coordinator workflow graph over the incident."""
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     inc = _load_incident(db, principal, incident_id, scope)
     result = orchestrator.run_investigation(db, principal.tenant_id, inc.id, scope,
                                             actor_label=principal.email)
@@ -240,7 +240,7 @@ def recommended_actions(incident_id: uuid.UUID,
                         db: Session = Depends(get_db)) -> dict:
     """Deterministic response recommendations derived from the scenario + facts.
     These are RECOMMENDATIONS only — nothing is executed here."""
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     inc = _load_incident(db, principal, incident_id, scope)
     from ..seed.scenarios import SCENARIO_INDEX
     fact = db.execute(select(Evidence).where(
@@ -274,7 +274,7 @@ def recommended_actions(incident_id: uuid.UUID,
 def similar_knowledge(incident_id: uuid.UUID,
                       principal: Principal = Depends(require_permission("knowledge:read")),
                       db: Session = Depends(get_db)) -> dict:
-    scope = current_scope(db)
+    scope = current_scope(db, principal.tenant_id)
     inc = _load_incident(db, principal, incident_id, scope)
     results = knowledge_search(
         db, principal.tenant_id, f"{inc.title} {inc.summary}",

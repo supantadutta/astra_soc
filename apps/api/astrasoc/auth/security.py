@@ -39,6 +39,24 @@ def verify_password(password: str, stored: str) -> bool:
         return False
 
 
+def password_policy_errors(password: str) -> list[str]:
+    """Return the ways a password fails policy (empty list = acceptable)."""
+    errors: list[str] = []
+    if len(password or "") < settings.password_min_length:
+        errors.append(f"must be at least {settings.password_min_length} characters")
+    classes = sum([
+        any(c.islower() for c in password), any(c.isupper() for c in password),
+        any(c.isdigit() for c in password), any(not c.isalnum() for c in password),
+    ])
+    if classes < 3:
+        errors.append("must mix at least 3 of: lowercase, uppercase, digits, symbols")
+    return errors
+
+
+def normalize_email(email: str) -> str:
+    return (email or "").strip().lower()
+
+
 # --- JWT -----------------------------------------------------------------
 def create_access_token(claims: dict[str, Any], ttl_seconds: int | None = None) -> str:
     now = datetime.now(UTC)

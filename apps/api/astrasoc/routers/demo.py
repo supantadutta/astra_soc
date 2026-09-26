@@ -35,7 +35,7 @@ def launch(scenario_key: str,
            principal: Principal = Depends(require_permission("demo:manage")),
            db: Session = Depends(get_db)) -> dict:
     """Create a fresh incident from a scenario. DEMO mode only."""
-    if get_mode(db).is_live:
+    if get_mode(db, principal.tenant_id).is_live:
         raise HTTPException(400, detail="Scenario launch is only available in DEMO mode.")
     try:
         inc = launch_scenario(db, principal.tenant_id, scenario_key)
@@ -53,7 +53,7 @@ def reset(principal: Principal = Depends(require_permission("demo:manage")),
           db: Session = Depends(get_db)) -> dict:
     """Delete all DEMO-scoped data for the tenant and reseed. LIVE data is never
     touched."""
-    if get_mode(db).is_live:
+    if get_mode(db, principal.tenant_id).is_live:
         raise HTTPException(400, detail="Cannot reset demo data while in LIVE mode.")
     result = reset_demo(db, principal.tenant_id)
     audit.record(db, action="demo.reset", actor_id=principal.user_id,
