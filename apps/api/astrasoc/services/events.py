@@ -8,8 +8,9 @@
   acting tenant, the data scope) it may see. Events without a tenant are
   never delivered to subscribers.
 
-In production the same publish() calls can be pointed at Redpanda/Kafka; the
-API layer is unchanged.
+* Cross-replica: with PostgreSQL, :mod:`astrasoc.services.cluster` installs a
+  forwarder that NOTIFYs other replicas, and relays their events here through
+  :meth:`EventBus.publish_remote` (which does not forward again).
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ import asyncio
 import json
 import threading
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -65,9 +67,19 @@ class EventBus:
         self._counter = 0
         self._loop: asyncio.AbstractEventLoop | None = None
         self._lock = threading.Lock()
+        self._forwarder: Callable[[Event], None] | None = None
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
+
+    def set_forwarder(self, forwarder: Callable[[Event], None] | None) -> None:
+        """Called (non-blocking) for every locally published event."""
+        self._forwarder = forwarder
+
+    def _forward(self, event: Event) -> None:
+        fwd = self._forwarder
+        if fwd is not None:
+            fwd(event)
 
     def _deliver(self, event: Event) -> None:
         for sub in list(self._subs):
@@ -82,9 +94,18 @@ class EventBus:
             self._counter += 1
             self._recent.append(event)
         self._deliver(event)
+        self._forward(event)
 
     def publish_soon(self, event: Event) -> None:
         """Publish from any thread."""
+        self._forward(event)
+        self._record_and_deliver(event)
+
+    def publish_remote(self, event: Event) -> None:
+        """Deliver an event published on another replica (never re-forwarded)."""
+        self._record_and_deliver(event)
+
+    def _record_and_deliver(self, event: Event) -> None:
         with self._lock:
             self._counter += 1
             self._recent.append(event)

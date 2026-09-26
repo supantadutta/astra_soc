@@ -13,8 +13,10 @@ imagePullSecrets: []
 
 api:
   repository: astrasoc-api
-  # The API keeps the event bus, SLA sweeper and rate limiter in-process, so
-  # it must run as exactly ONE replica (the chart enforces this).
+  # Replicas coordinate through PostgreSQL (event fan-out via LISTEN/NOTIFY,
+  # leader election for the SLA sweeper). 2+ gives zero-downtime rollouts.
+  # Note: the in-process rate limiter counts per replica.
+  replicas: 2
   port: 8000
   defaultMode: DEMO          # DEMO | LIVE (per-tenant mode can be changed at runtime)
   allowLiveMode: true

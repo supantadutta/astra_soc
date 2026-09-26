@@ -170,6 +170,10 @@ function refreshSession(startedAt: number): Promise<boolean> {
   if (!inflight) {
     const run = async () => {
       if (Number(store()?.getItem(REFRESHED_AT_KEY) || 0) > startedAt) return true;
+      // The CSRF cookie is set and cleared together with the refresh cookie,
+      // and a cookie refresh without it is refused. Without it there is no
+      // session to refresh, so don't spend the per-IP sign-in rate limit.
+      if (!readCookie(CSRF_COOKIE)) return false;
       try {
         const res = await fetch(`/api/v1/auth/refresh`, {
           method: "POST",

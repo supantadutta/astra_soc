@@ -70,7 +70,8 @@ break-glass). The rules are in [MSSP](MSSP.md#how-provider-staff-reach-customer-
 ## Management endpoints
 
 - `/api/v1/rbac/*`: roles, permission matrix, users and assignments (acting
-  tenant).
+  tenant); `POST /rbac/users/{id}/mfa/reset` clears a lost second factor
+  (never for yourself, never for someone holding permissions you lack).
 - `/api/v1/tenants`, `/api/v1/tenants/current`: tenants the caller can act in;
   own-organization self-service.
 - `/api/v1/mssp/*`: portfolio, customer lifecycle, grants (provider staff).

@@ -92,6 +92,23 @@ def test_logout_revokes_access_token(client):
     assert client.get("/api/v1/auth/me", headers=h).status_code == 401
 
 
+def _age_last_rotation(refresh_token: str, seconds: int = 300) -> None:
+    """Pretend the rotation that issued `refresh_token` happened long ago."""
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import select
+
+    from astrasoc.auth.security import hash_token
+    from astrasoc.db import SessionLocal
+    from astrasoc.models import Session as SessionModel
+
+    with SessionLocal() as db:
+        sess = db.execute(select(SessionModel).where(
+            SessionModel.refresh_token_hash == hash_token(refresh_token))).scalar_one()
+        sess.last_used_at = datetime.now(UTC) - timedelta(seconds=seconds)
+        db.commit()
+
+
 def test_refresh_rotates_and_detects_reuse(client):
     r = client.post("/api/v1/auth/login", json={"email": "exec@acme.io", "password": "Demo!Pass123"})
     first = r.json()
@@ -99,7 +116,50 @@ def test_refresh_rotates_and_detects_reuse(client):
     assert r2.status_code == 200
     rotated = r2.json()
     assert rotated["refresh_token"] != first["refresh_token"]
-    # Replaying the superseded token revokes the whole session.
+    # Replaying the superseded token after the grace window revokes the
+    # whole session.
+    _age_last_rotation(rotated["refresh_token"])
+    assert client.post("/api/v1/auth/refresh",
+                       json={"refresh_token": first["refresh_token"]}).status_code == 401
+    h = {"Authorization": f"Bearer {rotated['access_token']}"}
+    assert client.get("/api/v1/auth/me", headers=h).status_code == 401
+    assert client.post("/api/v1/auth/refresh",
+                       json={"refresh_token": rotated["refresh_token"]}).status_code == 401
+
+
+def test_refresh_grace_covers_a_lost_rotation_once(client):
+    """A browser that navigates mid-refresh never stores the rotated cookie
+    and presents the previous token again. That must not sign the user out,
+    but the previous token is honoured only once and only briefly."""
+    first = client.post("/api/v1/auth/login",
+                        json={"email": "exec@acme.io", "password": "Demo!Pass123"}).json()
+    lost = client.post("/api/v1/auth/refresh", json={"refresh_token": first["refresh_token"]})
+    assert lost.status_code == 200  # response never reached the browser
+    retry = client.post("/api/v1/auth/refresh", json={"refresh_token": first["refresh_token"]})
+    assert retry.status_code == 200
+    current = retry.json()
+    h = {"Authorization": f"Bearer {current['access_token']}"}
+    assert client.get("/api/v1/auth/me", headers=h).status_code == 200
+    # The same old token a third time is no longer recognised at all.
+    assert client.post("/api/v1/auth/refresh",
+                       json={"refresh_token": first["refresh_token"]}).status_code == 401
+    assert client.get("/api/v1/auth/me", headers=h).status_code == 200
+    # The token from the lost response is now the previous one: honoured
+    # within the window, treated as theft after it.
+    _age_last_rotation(current["refresh_token"])
+    assert client.post("/api/v1/auth/refresh",
+                       json={"refresh_token": lost.json()["refresh_token"]}).status_code == 401
+    assert client.get("/api/v1/auth/me", headers=h).status_code == 401
+
+
+def test_refresh_grace_can_be_disabled(client, monkeypatch):
+    from astrasoc.config import settings
+
+    monkeypatch.setattr(settings, "refresh_reuse_grace_seconds", 0)
+    first = client.post("/api/v1/auth/login",
+                        json={"email": "exec@acme.io", "password": "Demo!Pass123"}).json()
+    rotated = client.post("/api/v1/auth/refresh",
+                          json={"refresh_token": first["refresh_token"]}).json()
     assert client.post("/api/v1/auth/refresh",
                        json={"refresh_token": first["refresh_token"]}).status_code == 401
     h = {"Authorization": f"Bearer {rotated['access_token']}"}

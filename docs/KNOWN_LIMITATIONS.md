@@ -8,8 +8,8 @@ elsewhere in the product; the UI states the same limits where they apply.
 
 | Limitation | Impact | Mitigation / path |
 |------------|--------|-------------------|
-| **The API must run as a single replica.** The live event bus, SLA breach sweeper, rate limiter and demo generator are in-process. | No horizontal scaling of the API; a restart drops live streams (browsers reconnect automatically with a new ticket). The Helm chart and manifests enforce `replicas: 1` with a `Recreate` strategy. | Scale the web tier freely. For multi-replica API, move the bus to Redis/Kafka, the sweeper to a leader-elected worker and rate limiting to Redis or the ingress. |
-| Rate limiting is in-memory per process. | Resets on restart. Authenticated traffic is limited per credential; login/refresh per client IP (`ASTRASOC_AUTH_RATE_LIMIT_PER_MINUTE`, default 20). | Also enforce limits at the ingress / WAF. Set `ASTRASOC_TRUSTED_PROXIES` so the real client IP is used. |
+| Rate limiting is in-memory **per replica**. | Resets on restart; with N API replicas the effective limit is up to N times the configured one. Authenticated traffic (Bearer, API key or session cookie) is limited per credential; sign-in and refresh per client IP (`ASTRASOC_AUTH_RATE_LIMIT_PER_MINUTE`, default 20). Per-account lockout is database-backed and therefore global. | Also enforce limits at the ingress / WAF. Set `ASTRASOC_TRUSTED_PROXIES` so the real client IP is used. |
+| Multiple API replicas require PostgreSQL. | Replicas coordinate through PostgreSQL: events fan out with LISTEN/NOTIFY and one replica (advisory-lock leader) runs the SLA sweeper and demo generator, with failover in seconds. A stopping replica ends the streams connected to it; browsers reconnect with a new ticket within a few seconds. A new stream replays the tenant's last 20 events, so a short gap is covered; beyond that, events from the gap are not replayed (pages still show them on their next load). SQLite deployments are single-process. | Use PostgreSQL for any production or multi-replica deployment (the production guard already requires it). |
 | Behind the web tier's `/api` proxy, the API sees the web container's address unless `WEB_TRUST_FORWARDED_FOR=true` and `ASTRASOC_TRUSTED_PROXIES` include the web tier. | Per-IP login limits and audit IPs would reflect the proxy. | The Kubernetes ingress routes `/api` straight to the API (real IPs preserved). The production compose file enables forwarding and expects a TLS reverse proxy in front of port 3000. |
 | Optional enterprise datastores (ClickHouse, Neo4j, OpenSearch, Kafka/Redpanda, Temporal, OPA, Redis) are not wired. | PostgreSQL holds everything. Platform Health reports them as `not_configured`, never healthy. | The service interfaces are in place; each is an integration project. |
 
@@ -25,13 +25,19 @@ elsewhere in the product; the UI states the same limits where they apply.
 
 ## Identity and sessions
 
-- **No SSO/OIDC/SAML and no MFA.** Local accounts only, with a password policy,
-  lockout and revocable server-side sessions. Front the platform with an
-  identity-aware proxy if SSO or MFA is required.
-- Access and refresh tokens are held in the browser's `localStorage`. The CSP
-  blocks third-party scripts and framing, but still permits inline scripts
-  (needed by Next.js), so an XSS bug would expose tokens. Moving to
-  `HttpOnly` cookies is the recommended next step.
+- **No SSO/OIDC/SAML.** Local accounts with a password policy, lockout,
+  revocable server-side sessions and TOTP two-step verification (which a
+  tenant can require). Front the platform with an identity-aware proxy if
+  corporate SSO is required.
+- Second factor is TOTP (authenticator apps) plus recovery codes. WebAuthn /
+  passkeys and push-based MFA are not implemented.
+- Browser sessions use HttpOnly, SameSite=Strict cookies, so page JavaScript
+  cannot read the tokens. The CSP still permits inline scripts (needed by
+  Next.js); an XSS bug could therefore act as the user while the page is open,
+  though it could not steal the session.
+- The MFA encryption key (`ASTRASOC_DATA_ENCRYPTION_KEY`, or the audit key when
+  unset) cannot be rotated in place: changing it invalidates enrolled
+  authenticators, and affected users must be reset and re-enroll.
 - User provisioning is manual (no SCIM).
 
 ## AI

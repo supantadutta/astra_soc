@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Generator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, MetaData, String, TypeDecorator, create_engine
+from sqlalchemy import DateTime, MetaData, String, TypeDecorator, create_engine, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.types import JSON
@@ -126,6 +127,7 @@ def _alembic_config():
     root = Path(__file__).resolve().parent.parent
     cfg = Config(str(root / "alembic.ini"))
     cfg.set_main_option("script_location", str(root / "alembic"))
+    cfg.attributes["configure_logger"] = False  # keep the application's logging intact
     return cfg
 
 
@@ -137,6 +139,27 @@ def schema_is_current() -> bool:
     with engine.connect() as conn:
         current = MigrationContext.configure(conn).get_current_revision()
     return current == head
+
+
+_STARTUP_LOCK_KEY = 0x41535453  # "ASTS"
+
+
+@contextmanager
+def startup_lock():
+    """Serialise schema migration and first-boot seeding across replicas that
+    start at the same time (PostgreSQL advisory lock; no-op on SQLite)."""
+    if settings.is_sqlite:
+        yield
+        return
+    conn = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+    try:
+        conn.execute(text("SELECT pg_advisory_lock(:k)"), {"k": _STARTUP_LOCK_KEY})
+        yield
+    finally:
+        try:
+            conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _STARTUP_LOCK_KEY})
+        finally:
+            conn.close()
 
 
 def init_db() -> None:

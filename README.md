@@ -66,25 +66,33 @@ start with unsafe configuration and never creates demo accounts in production.
 - 13 report types; JSON / CSV / HTML / PDF export.
 
 **Platform security**, see [docs/SECURITY.md](docs/SECURITY.md)
-- Revocable server-side sessions, rotating refresh tokens with reuse
-  detection, lockout, password policy, scoped expiring API keys.
+- TOTP two-step verification with recovery codes; organizations can require
+  it, and the requirement binds provider staff entering the customer.
+- HttpOnly cookie sessions with CSRF protection (tokens never reach page
+  JavaScript), revocable server-side sessions, rotating refresh tokens with
+  reuse detection, lockout, password policy, scoped expiring API keys.
 - 56 permissions, 21 built-in roles, grant rules that prevent privilege
   escalation, per-tenant DEMO/LIVE operating modes.
 - Keyed (HMAC) tamper-evident audit chain.
 - Secret references only (tenant-confined `vault://`, HashiCorp Vault
   support); SSRF-safe egress policy.
+- Horizontally scalable API: replicas coordinate through PostgreSQL (event
+  fan-out, leader election with failover, serialised migrations).
 - Hardened containers, Helm chart, Kubernetes manifests, ArgoCD, CI.
 
 ## Verified
 
-122 backend tests pass on SQLite and PostgreSQL 16; migrations match the
-models; lint, type-check and production build are clean; `npm audit` reports 0
-vulnerabilities; 27 Playwright end-to-end runs pass on desktop, tablet and phone;
-both images were built and the production stack was smoke-tested. Details and
-what was **not** tested: [docs/TESTING_REPORT.md](docs/TESTING_REPORT.md).
+148 backend tests pass on PostgreSQL 16 (146 on SQLite, where the two
+cross-replica tests are skipped); migrations match the models; lint,
+type-check and production build are clean; `npm audit` reports 0
+vulnerabilities; 42 Playwright end-to-end runs pass on desktop, tablet and
+phone; both images were built and the production stack was run with two API
+replicas (cross-replica events, leader failover, 1.5 s shutdown with live
+streams open). Details and what was **not** tested:
+[docs/TESTING_REPORT.md](docs/TESTING_REPORT.md).
 
 Read [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md) before production
-use, especially on the single-replica API and the response gateway.
+use, especially the response gateway section.
 
 ## Repository layout
 

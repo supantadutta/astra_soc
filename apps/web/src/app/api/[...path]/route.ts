@@ -38,8 +38,14 @@ async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }
   const xff = TRUST_XFF ? req.headers.get("x-forwarded-for") : null;
   if (xff) headers.set("x-forwarded-for", xff);
 
+  // End the upstream request when the browser goes away. Without this, every
+  // closed tab left its live stream open on the API (with a bus subscription
+  // and a session check every 15 s) until the session expired.
+  const upstreamAbort = new AbortController();
+  req.signal.addEventListener("abort", () => upstreamAbort.abort(), { once: true });
+
   const init: RequestInit & { duplex?: "half" } = {
-    method: req.method, headers, redirect: "manual", cache: "no-store",
+    method: req.method, headers, redirect: "manual", cache: "no-store", signal: upstreamAbort.signal,
   };
   if (!["GET", "HEAD"].includes(req.method)) {
     init.body = req.body;
@@ -63,7 +69,25 @@ async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }
     out.set("x-accel-buffering", "no");
     out.set("cache-control", "no-cache, no-transform");
   }
-  return new Response(upstream.body, { status: upstream.status, headers: out });
+  if (!upstream.body) return new Response(null, { status: upstream.status, headers: out });
+  // Cancelling the response (client disconnect) also aborts the upstream.
+  const reader = upstream.body.getReader();
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) controller.close();
+        else controller.enqueue(value);
+      } catch (err) {
+        controller.error(err);
+      }
+    },
+    cancel(reason) {
+      upstreamAbort.abort(reason);
+      return reader.cancel(reason).catch(() => undefined);
+    },
+  });
+  return new Response(body, { status: upstream.status, headers: out });
 }
 
 export { proxy as GET, proxy as POST, proxy as PUT, proxy as PATCH, proxy as DELETE, proxy as OPTIONS };

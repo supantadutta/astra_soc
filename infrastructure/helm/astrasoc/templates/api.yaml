@@ -7,9 +7,11 @@ metadata:
   labels: {{- include "astrasoc.labels" . | nindent 4 }}
     app.kubernetes.io/component: api
 spec:
-  # Exactly one replica: in-process event bus, SLA sweeper and rate limiter.
-  replicas: 1
-  strategy: { type: Recreate }
+  # Replicas coordinate through PostgreSQL (see values.yaml).
+  replicas: {{ .Values.api.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
   selector:
     matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: api }
   template:
@@ -20,6 +22,7 @@ spec:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
       automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 20
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets: {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -66,8 +69,17 @@ spec:
       {{- with .Values.api.tolerations }}
       tolerations: {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.api.affinity }}
-      affinity: {{- toYaml . | nindent 8 }}
+      {{- if .Values.api.affinity }}
+      affinity: {{- toYaml .Values.api.affinity | nindent 8 }}
+      {{- else if gt (int .Values.api.replicas) 1 }}
+      affinity:  # spread replicas across nodes by default
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: api }
       {{- end }}
 ---
 apiVersion: v1
@@ -78,3 +90,15 @@ metadata:
 spec:
   selector: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: api }
   ports: [{ name: http, port: {{ .Values.api.port }}, targetPort: http }]
+{{- if gt (int .Values.api.replicas) 1 }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $name }}-api
+  labels: {{- include "astrasoc.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: api }
+{{- end }}

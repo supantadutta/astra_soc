@@ -4,6 +4,10 @@ import { defineConfig, devices } from "@playwright/test";
  * Playwright config. Assumes the API (:8000) and web (:3000) servers are
  * already running (see `make dev` / docker compose). Point BASE_URL elsewhere
  * to test another deployment. Uses the pre-installed Chromium when present.
+ *
+ * Every spec signs in from the same IP, and sign-in is rate limited per IP
+ * (default 20/min). Start the API under test with a higher limit, e.g.
+ * ASTRASOC_AUTH_RATE_LIMIT_PER_MINUTE=300, or later specs get 429s.
  */
 const CHROME = process.env.PLAYWRIGHT_CHROMIUM_PATH || "/opt/pw-browsers/chromium";
 

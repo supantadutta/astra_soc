@@ -34,8 +34,12 @@ The API refuses to start in production unless these hold:
 - [ ] **Automated response in LIVE mode.** The response gateway was not
       re-reviewed in the MSSP hardening pass, and customer approval routing is
       not enforced. Get an independent review, or restrict `action:execute`.
-- [ ] Single API replica: acceptable for your availability target?
-- [ ] No SSO/MFA: put an identity-aware proxy in front if required.
+- [ ] Run at least two API replicas (the Helm default) for zero-downtime
+      rollouts and leader failover; size PostgreSQL for its role as the
+      coordination point.
+- [ ] Require two-step verification for your provider tenant (Organization →
+      Sign-in security) and encourage or require it for customers. No SSO:
+      put an identity-aware proxy in front if corporate SSO is required.
 - [ ] External LLMs: which tiers/customers may use hosted models? Configure
       strategies, private-model-only and budgets per tenant.
 - [ ] Penetration test and load test before general availability.

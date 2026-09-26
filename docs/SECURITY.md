@@ -15,19 +15,54 @@
 
 - Passwords: PBKDF2-HMAC-SHA256, never stored reversibly. Policy: at least 12
   characters with mixed character classes (`ASTRASOC_PASSWORD_MIN_LENGTH`).
-- Lockout: 5 failed sign-ins lock the account for 15 minutes (configurable).
-  Sign-in failures return one uniform message.
-- Sessions are server-side. Each access token carries a session id that is
-  checked on every request, so **logout, password change and revocation take
-  effect immediately**. Users can list and revoke their own sessions.
+- Lockout: 5 failed attempts lock the account for 15 minutes (configurable).
+  Failed second-factor codes count too, and a correct password alone never
+  resets the counter. Sign-in failures return one uniform message.
+- **Browser sessions** live in cookies page JavaScript cannot read:
+  `HttpOnly`, `SameSite=Strict`, `Secure` in production; the refresh cookie is
+  sent only to `/api/v1/auth`. State-changing requests authenticated by
+  cookie must echo a separate CSRF cookie in `X-CSRF-Token` (double-submit).
+  CLIs and integrations use `Authorization: Bearer` or API keys, which are not
+  subject to CSRF.
+- Sessions are server-side. Each access token carries a session id checked on
+  every request, so **logout, password change and revocation take effect
+  immediately**. Users can list and revoke their own sessions.
 - Refresh tokens rotate on every use. Replaying a superseded refresh token is
   treated as theft and revokes the whole session. The web client serialises
-  refreshes (across tabs too) so legitimate use never trips this.
+  refreshes (across tabs too). The one token superseded by the latest
+  rotation is honoured once for 30 seconds
+  (`ASTRASOC_REFRESH_REUSE_GRACE_SECONDS`, 0 disables): a browser that
+  navigates mid-refresh never receives the rotated cookie, and without this
+  window it was signed out as a suspected theft.
 - API keys are stored hashed and shown once, require explicit scopes (never
   more than the creator holds), expire (1–365 days), are bound to the tenant
   that issued them, and re-check delegated access on every use.
 - Suspended tenants cannot sign in or use existing sessions.
-- Not provided: SSO/OIDC/SAML, MFA, SCIM (see Known Limitations).
+
+## Two-step verification (MFA)
+
+- TOTP per RFC 6238 (verified against the RFC test vectors) with any standard
+  authenticator app; ±30 s drift; a time step, once used, is never accepted
+  again (replay protection).
+- The TOTP secret is encrypted at rest (Fernet, key derived with HKDF from
+  `ASTRASOC_DATA_ENCRYPTION_KEY`, or from the audit key). Ten single-use
+  recovery codes are shown once and stored as salted PBKDF2 hashes.
+- Sign-in with MFA is two steps. The password step returns a 5-minute
+  challenge token that grants nothing but the second step.
+- **Tenant policy:** an organization can require MFA. Its users must enroll at
+  their next sign-in (a 15-minute enrollment token allows only that), and
+  existing sessions without a second factor stop working. The requirement
+  also binds **provider staff entering the customer, including their API
+  keys**. An administrator cannot switch the requirement on without MFA on
+  their own account. The provider may impose it on a customer, but cannot
+  lift a requirement the customer set.
+- Users disable MFA only with password + code (not where required); admins
+  reset a lost device (sessions revoked, grant rules apply). All MFA events
+  are audited.
+- No MFA secrets, recovery hashes, password or key hashes are ever serialised
+  by the API: the serializer drops those columns for every endpoint.
+- Not provided: SSO/OIDC/SAML, WebAuthn/passkeys, SCIM (see Known
+  Limitations).
 
 ## Authorization
 

@@ -44,6 +44,27 @@ test("session tokens are not readable by page JavaScript", async ({ page }) => {
   expect(visible.storage).not.toMatch(/access|refresh|token/i);
 });
 
+test("an expired access cookie is refreshed transparently", async ({ page }) => {
+  await signIn(page, "manager@acme.io", "Demo!Pass123");
+  await page.waitForURL(/\/dashboard/);
+  const refreshes: string[] = [];
+  page.on("request", (r) => {
+    if (r.url().endsWith("/api/v1/auth/refresh")) refreshes.push(r.url());
+  });
+  // Simulate the one-hour access cookie expiring; the refresh cookie remains.
+  // Background polling or the navigation below triggers the refresh; the
+  // navigation may abort an in-flight one, which must not end the session.
+  await page.context().clearCookies({ name: "astrasoc_at" });
+  await page.goto("/incidents");
+  await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();
+  // Still signed in on the next navigation (the session was not revoked).
+  await page.goto("/alerts");
+  await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();
+  expect(page.url()).toContain("/alerts");
+  expect(refreshes.length).toBeGreaterThan(0);
+  expect((await page.context().cookies()).map((c) => c.name)).toContain("astrasoc_at");
+});
+
 test("enroll two-step verification, sign out, sign back in with a code", async ({ page, baseURL }) => {
   // Provision a fresh account through the API as the platform admin.
   const api = await apiRequest.newContext({ baseURL });

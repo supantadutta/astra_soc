@@ -23,6 +23,7 @@ from ..models import (
 )
 from ..models.enums import ApprovalStatus, IncidentStatus
 from ..seed.engine import generator_state
+from ..services.cluster import cluster_stats
 from ..services.events import bus
 from ..services.mode import current_scope, get_mode
 
@@ -165,6 +166,7 @@ health_router = APIRouter(prefix="/api/v1/platform", tags=["platform-health"])
 @health_router.get("/health")
 def platform_health(principal: Principal = Depends(require_permission("health:read")),
                     db: Session = Depends(get_db)) -> dict:
+    gen = generator_state()
     tid = principal.tenant_id
     providers = db.execute(select(ModelProvider).where(ModelProvider.tenant_id == tid)).scalars().all()
     connectors = db.execute(select(Connector).where(Connector.tenant_id == tid)).scalars().all()
@@ -186,11 +188,12 @@ def platform_health(principal: Principal = Depends(require_permission("health:re
             {"name": "database", "state": db_state,
              "detail": "sqlite" if settings.is_sqlite else "postgresql"},
             {"name": "event_bus", "state": "healthy",
-             "detail": f"{bus.subscriber_count} subscribers, {bus.total_published} published"},
+             "detail": f"{bus.subscriber_count} subscribers, {bus.total_published} published"
+                       + (f"; cross-replica {cluster_stats()}" if cluster_stats() else "")},
             {"name": "demo_generator",
-             "state": ("unhealthy" if generator_state().get("last_error")
-                       else "healthy" if generator_state()["running"] else "not_running"),
-             "detail": generator_state()},
+             "state": ("unhealthy" if gen.get("last_error")
+                       else "healthy" if gen["running"] else "not_running"),
+             "detail": gen},
         ],
         "dependencies": [
             {"name": "redis", "state": "not_configured" if not settings.redis_url else "configured"},

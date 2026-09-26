@@ -15,8 +15,8 @@
 # and point ASTRASOC_DATABASE_URL at it) and source the secret from
 # External Secrets / Vault. Edit the Ingress host and CORS origin.
 #
-# The API runs as ONE replica: the event bus, SLA sweeper and rate limiter are
-# in-process (see docs/KNOWN_LIMITATIONS.md). The web tier scales freely.
+# API replicas coordinate through PostgreSQL (event fan-out via LISTEN/NOTIFY,
+# leader election for the SLA sweeper), so both tiers scale horizontally.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -96,8 +96,10 @@ metadata:
   namespace: astrasoc
   labels: { app: astrasoc-api }
 spec:
-  replicas: 1          # single writer: see header note
-  strategy: { type: Recreate }
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
   selector:
     matchLabels: { app: astrasoc-api }
   template:
@@ -146,6 +148,16 @@ spec:
             - { name: tmp, mountPath: /tmp }
       volumes:
         - { name: tmp, emptyDir: {} }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: astrasoc-api
+  namespace: astrasoc
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: astrasoc-api }
 ---
 apiVersion: v1
 kind: Service

@@ -39,7 +39,7 @@ test-api: ## Run the backend test suite
 	cd $(API) && python -m pytest -q
 
 .PHONY: test-e2e
-test-e2e: ## Run Playwright end-to-end tests (requires running servers)
+test-e2e: ## Run Playwright end-to-end tests (requires running servers; start the API with ASTRASOC_AUTH_RATE_LIMIT_PER_MINUTE=300)
 	cd $(WEB) && npx playwright test
 
 .PHONY: lint

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -310,20 +311,72 @@ def launch_scenario(db: Session, tenant_id: uuid.UUID, key: str) -> Incident:
 
 
 # --- Continuous generator -------------------------------------------------
-_generator_state = {"running": False, "paused": False, "speed": 1.0, "events": 0, "aps": 0.0,
-                    "last_error": None}
+# Control (paused/speed) lives in the database so a request handled by any API
+# replica reaches the replica that runs the generator (the cluster leader).
+# That replica publishes its stats to the same row.
+_GEN_KEY = "demo_generator"
+_local = {"running": False, "events": 0, "aps": 0.0, "last_error": None}
+
+
+def _gen_row(db):
+    from ..models import SystemSetting
+
+    row = db.execute(select(SystemSetting).where(SystemSetting.tenant_id.is_(None),
+                                                 SystemSetting.key == _GEN_KEY)).scalar_one_or_none()
+    if row is None:
+        row = SystemSetting(tenant_id=None, key=_GEN_KEY, value={"paused": False, "speed": 1.0},
+                            description="Demo event generator control and status.")
+        db.add(row)
+        db.flush()
+    return row
+
+
+def _control(db) -> dict:
+    v = _gen_row(db).value or {}
+    return {"paused": bool(v.get("paused", False)), "speed": float(v.get("speed", 1.0))}
 
 
 def generator_state() -> dict:
-    return dict(_generator_state)
+    with SessionLocal() as db:
+        v = dict(_gen_row(db).value or {})
+        db.commit()
+    stats = v.get("stats") or {}
+    # Stats are refreshed every ~10 s by the generating replica; if they are
+    # older than a minute, nothing is generating (e.g. that replica died).
+    fresh = False
+    if stats.get("updated_at"):
+        try:
+            fresh = datetime.now(UTC) - datetime.fromisoformat(stats["updated_at"]) < timedelta(seconds=60)
+        except ValueError:
+            fresh = False
+    return {"paused": bool(v.get("paused", False)), "speed": float(v.get("speed", 1.0)),
+            "running": bool(stats.get("running", False)) and fresh, "events": int(stats.get("events", 0)),
+            "aps": float(stats.get("aps", 0.0)), "last_error": stats.get("last_error"),
+            "updated_at": stats.get("updated_at"), "replica": stats.get("replica")}
 
 
 def set_generator(paused: bool | None = None, speed: float | None = None) -> dict:
-    if paused is not None:
-        _generator_state["paused"] = paused
-    if speed is not None:
-        _generator_state["speed"] = max(0.25, min(10.0, speed))
+    with SessionLocal() as db:
+        row = _gen_row(db)
+        v = dict(row.value or {})
+        if paused is not None:
+            v["paused"] = bool(paused)
+        if speed is not None:
+            v["speed"] = max(0.25, min(10.0, float(speed)))
+        row.value = v
+        db.commit()
     return generator_state()
+
+
+def _publish_stats(running: bool) -> None:
+    from ..services.cluster import REPLICA_ID
+
+    with SessionLocal() as db:
+        row = _gen_row(db)
+        row.value = {**(row.value or {}), "stats": {
+            **_local, "running": running, "replica": REPLICA_ID,
+            "updated_at": datetime.now(UTC).isoformat()}}
+        db.commit()
 
 
 _BENIGN = [
@@ -378,25 +431,39 @@ def _emit_tick() -> int:
             ingest_event(db, tid, DEMO, _synthetic_event())
             produced += 1
         db.commit()
-    _generator_state["events"] += produced
+    _local["events"] += produced
     return produced
 
 
-async def run_live_generator() -> None:
-    """Background loop producing synthetic demo telemetry."""
-    _generator_state["running"] = True
+async def run_live_generator(leader=None) -> None:
+    """Background loop producing synthetic demo telemetry. With several API
+    replicas only the leader generates (see services.cluster)."""
     interval = settings.demo_event_interval_seconds
+    last_stats = 0.0
     try:
         while True:
-            if not _generator_state["paused"]:
+            speed = 1.0
+            if leader is None or leader.is_leader:
                 try:
-                    produced = await asyncio.to_thread(_emit_tick)
-                    _generator_state["aps"] = round(produced * _generator_state["speed"] / interval, 2)
-                    _generator_state["last_error"] = None
+                    control = await asyncio.to_thread(lambda: _with_db(_control))
+                    speed = control["speed"]
+                    if not control["paused"]:
+                        produced = await asyncio.to_thread(_emit_tick)
+                        _local["aps"] = round(produced * speed / interval, 2)
+                    _local["last_error"] = None
                 except Exception as exc:  # never let the loop die — but surface the error
-                    _generator_state["last_error"] = f"{type(exc).__name__}: {exc}"[:300]
+                    _local["last_error"] = f"{type(exc).__name__}: {exc}"[:300]
                     logger.exception("Demo generator tick failed")
-            await asyncio.sleep(max(0.3, interval / _generator_state["speed"]))
+                if time.monotonic() - last_stats > 10:
+                    last_stats = time.monotonic()
+                    await asyncio.to_thread(_publish_stats, True)
+            await asyncio.sleep(max(0.3, interval / speed))
     except asyncio.CancelledError:  # pragma: no cover
-        _generator_state["running"] = False
         raise
+
+
+def _with_db(fn):
+    with SessionLocal() as db:
+        out = fn(db)
+        db.commit()
+        return out

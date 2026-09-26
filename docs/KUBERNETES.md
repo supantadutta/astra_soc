@@ -1,6 +1,6 @@
 # Kubernetes
 
-Three options, all with the same shape: a single-replica API (`Recreate`
+Three options, all with the same shape: a horizontally scaled API (rolling
 strategy), a horizontally scalable web tier, PostgreSQL, and an ingress that
 routes `/api` to the API and everything else to the web tier.
 
@@ -32,12 +32,14 @@ Key values (`values.yaml` documents them all):
 |-------|---------|-------|
 | `secrets.existingSecret` | `""` | Recommended. Otherwise pass `secrets.jwtSecret`, `secrets.auditKey`, … with `--set`. The chart **refuses to render** without secrets or with identical JWT/audit keys. |
 | `postgresql.enabled` | `true` | Bundled single-instance PostgreSQL with a PVC, for pilots. For production, set `false` and provide `ASTRASOC_DATABASE_URL` for a managed, backed-up PostgreSQL. |
-| `web.replicas` | `2` | The API is always 1 replica. |
+| `api.replicas` | `2` | Rolling updates (`maxUnavailable: 0`), a PodDisruptionBudget and default pod anti-affinity when > 1. Replicas coordinate through PostgreSQL. |
+| `web.replicas` | `2` | Stateless. |
 | `api.trustedProxies` | `10.0.0.0/8` | Your ingress controller's pod network. |
 | `api.extraEnv` | `{}` | Any other `ASTRASOC_*` setting (egress allowlist, auth rate limit, …). |
 | `vault.addr` | `""` | Enables `vault://` resolution (token from the secret, key `ASTRASOC_VAULT_TOKEN`). |
 | `ingress.annotations` | nginx: buffering off, 1 h read timeout, 5 MB body | Required for the live event stream. |
 
+Replicas started together take turns migrating the schema (advisory lock).
 Pods run as non-root with a `RuntimeDefault` seccomp profile, with all
 capabilities dropped, no privilege escalation and no service-account token.
 The API has a read-only root filesystem. Probes: startup and liveness on

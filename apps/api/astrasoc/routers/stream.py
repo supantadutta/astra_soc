@@ -10,13 +10,15 @@ re-checked on every heartbeat, so logout / revocation ends the stream.
 from __future__ import annotations
 
 import asyncio
+import signal
+import threading
 import uuid
 from datetime import UTC, datetime, timedelta
 
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
-from sse_starlette.sse import EventSourceResponse
+from sse_starlette.sse import AppStatus, EventSourceResponse
 
 from ..auth.context import Principal
 from ..auth.deps import get_current_principal
@@ -31,6 +33,32 @@ router = APIRouter(prefix="/api/v1", tags=["stream"])
 
 TICKET_TTL = 60
 HEARTBEAT = 15.0
+
+
+def end_streams_on_shutdown() -> None:
+    """Close live streams as soon as the server is asked to stop.
+
+    sse-starlette ends its responses when uvicorn's exit handler runs, by
+    patching that handler at import time. Uvicorn (>= 0.29) installs its
+    signal handlers before it imports the app, so the patch never takes
+    effect: every open stream held the process until the graceful-shutdown
+    timeout, and a rolling update waited on each replica. Chain onto the
+    installed handlers instead. Clients reconnect with a fresh ticket, which
+    the load balancer sends to a replica that is still serving."""
+    if threading.current_thread() is not threading.main_thread():
+        return
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        previous = signal.getsignal(sig)
+        if not callable(previous):
+            continue
+
+        def handler(signum, frame, previous=previous):
+            AppStatus.should_exit = True
+            if AppStatus.should_exit_event is not None:
+                AppStatus.should_exit_event.set()
+            previous(signum, frame)
+
+        signal.signal(sig, handler)
 
 
 @router.post("/stream/ticket")

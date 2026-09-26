@@ -4,7 +4,7 @@ ASTRASOC is two containers plus PostgreSQL:
 
 ```
 browser ──HTTPS──▶ reverse proxy / ingress
-                     ├── /api/*  ──▶ api  (FastAPI, port 8000, ONE replica)  ──▶ PostgreSQL
+                     ├── /api/*  ──▶ api  (FastAPI, port 8000, N replicas)  ──▶ PostgreSQL
                      └── /*      ──▶ web  (Next.js, port 3000, N replicas)
 ```
 
@@ -52,12 +52,19 @@ check failed.
 
 - **Health:** `GET /api/v1/health/live` (process up) and
   `GET /api/v1/health/ready` (database reachable; returns 503 otherwise).
-- **Scaling:** exactly one API replica (see Known Limitations); scale the web
-  tier horizontally.
+- **Scaling:** both tiers scale horizontally. API replicas coordinate through
+  PostgreSQL: events fan out with LISTEN/NOTIFY, so an analyst's live stream
+  shows everything whichever replica it is connected to, and one replica
+  (elected with an advisory lock) runs the SLA sweeper, with failover within
+  seconds. Replicas starting together migrate and seed one at a time. The
+  in-process rate limiter counts per replica.
 - **Upgrades:** with auto-migrate, deploy the new image; the API applies
   migrations before serving. Take a database backup first ([BACKUP](BACKUP.md)).
-- **Shutdown:** the API bounds graceful shutdown to 10 s because live SSE
-  streams never finish on their own; browsers reconnect automatically.
+- **Shutdown:** on SIGTERM the API ends its live SSE streams immediately
+  (browsers reconnect to another replica with a fresh ticket), finishes
+  in-flight requests, releases leadership and exits; measured at 1.5 s with
+  a stream open. Graceful shutdown is also capped at 10 s
+  (`--timeout-graceful-shutdown`) as a backstop.
 - **Audit integrity:** `GET /api/v1/audit/verify` periodically; alert if
   `verified` is false.
 - **Backups:** PostgreSQL is the only stateful component. Back up

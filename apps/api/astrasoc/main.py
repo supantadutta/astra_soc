@@ -21,8 +21,9 @@ logger = logging.getLogger("astrasoc")
 _background_tasks: set[asyncio.Task] = set()
 
 
-async def run_sla_sweeper(interval: float = 60.0) -> None:
-    """Record SLA breaches and escalate, once a minute."""
+async def run_sla_sweeper(leader=None, interval: float = 60.0) -> None:
+    """Record SLA breaches and escalate, once a minute. With several API
+    replicas only the leader sweeps (see services.cluster)."""
     from .services.sla import sweep_breaches
 
     def _tick() -> int:
@@ -32,12 +33,13 @@ async def run_sla_sweeper(interval: float = 60.0) -> None:
             return n
 
     while True:
-        try:
-            n = await asyncio.to_thread(_tick)
-            if n:
-                logger.info("SLA sweeper escalated %d incident(s)", n)
-        except Exception:  # noqa: BLE001 — log and keep the worker alive
-            logger.exception("SLA sweeper failed")
+        if leader is None or leader.is_leader:
+            try:
+                n = await asyncio.to_thread(_tick)
+                if n:
+                    logger.info("SLA sweeper escalated %d incident(s)", n)
+            except Exception:  # noqa: BLE001 — log and keep the worker alive
+                logger.exception("SLA sweeper failed")
         await asyncio.sleep(interval)
 
 
@@ -55,32 +57,55 @@ async def lifespan(app: FastAPI):
             for p in problems:
                 logger.critical("Refusing to start: %s", p)
             raise RuntimeError("Unsafe production configuration: " + " | ".join(problems))
-    init_db()
+    from .db import startup_lock
     from .seed.bootstrap import ensure_seed
     from .seed.engine import ensure_demo_estate_data, run_live_generator
 
-    with SessionLocal() as db:
-        ensure_seed(db)
-        if settings.demo_seed_on_startup and settings.should_seed_demo_users:
-            ensure_demo_estate_data(db)
+    with startup_lock():  # replicas starting together migrate/seed one at a time
+        init_db()
+        with SessionLocal() as db:
+            ensure_seed(db)
+            if settings.demo_seed_on_startup and settings.should_seed_demo_users:
+                ensure_demo_estate_data(db)
 
-    # 2) Background workers: SLA breach sweeper (always) and the continuous
-    #    demo event generator (only produces DEMO-scoped data).
+    # 2) Cross-replica coordination (PostgreSQL): event fan-out and leader
+    #    election for the singleton workers below.
+    from .services.cluster import REPLICA_ID, LeaderElection, PgEventBridge, is_clustered, runtime
+
     if settings.environment != "test":
-        workers = [run_sla_sweeper()]
+        runtime.leader = LeaderElection()
+        runtime.leader.start()
+        if is_clustered():
+            runtime.bridge = PgEventBridge(bus)
+            runtime.bridge.start()
+        # Open live streams must not hold a stopping replica.
+        from .routers.stream import end_streams_on_shutdown
+
+        end_streams_on_shutdown()
+
+    # 3) Background workers: SLA breach sweeper (always) and the continuous
+    #    demo event generator (only produces DEMO-scoped data). Every replica
+    #    runs the loops; only the leader does the work.
+    if settings.environment != "test":
+        workers = [run_sla_sweeper(runtime.leader)]
         if settings.should_seed_demo_users:
-            workers.append(run_live_generator())
+            workers.append(run_live_generator(runtime.leader))
         for coro in workers:
             task = asyncio.create_task(coro)
             _background_tasks.add(task)
             task.add_done_callback(_background_tasks.discard)
 
-    logger.info("ASTRASOC API ready (environment=%s, db=%s)",
-                settings.environment, "sqlite" if settings.is_sqlite else "postgres")
+    logger.info("ASTRASOC API ready (environment=%s, db=%s, replica=%s)",
+                settings.environment, "sqlite" if settings.is_sqlite else "postgres",
+                REPLICA_ID)
     yield
 
     for task in _background_tasks:
         task.cancel()
+    if runtime.bridge:
+        runtime.bridge.stop()
+    if runtime.leader:
+        runtime.leader.stop()
 
 
 app = FastAPI(

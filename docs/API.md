@@ -7,7 +7,16 @@ Base path `/api/v1`. Interactive docs at `/api/docs` (Swagger) and
 
 - **Authentication:** `Authorization: Bearer <access token>` (from
   `POST /auth/login`, refreshed with `POST /auth/refresh`) or
-  `X-API-Key: <key>`.
+  `X-API-Key: <key>`. Browsers sign in with `"session": "cookie"` and receive
+  HttpOnly cookies instead of tokens; cookie-authenticated `POST/PUT/PATCH/
+  DELETE` requests must send the `astrasoc_csrf` cookie value in
+  `X-CSRF-Token`.
+- **Two-step sign-in:** if the account has MFA, `POST /auth/login` returns
+  `{"mfa_required": true, "mfa_token": …}`; complete it with
+  `POST /auth/login/mfa {"mfa_token", "code"}` (or `"recovery_code"`). If the
+  organization requires MFA and the user has none, it returns
+  `{"mfa_enrollment_required": true, "enrollment_token": …}`: call
+  `POST /auth/mfa/setup` and `POST /auth/mfa/enable` with that token.
 - **Tenant context:** add `X-Tenant-ID: <tenant id or slug>` to act inside
   another tenant you are allowed to reach (MSSP delegation). Omit it to act in
   your home tenant. `403 tenant_access_denied` if not allowed.
@@ -24,7 +33,7 @@ Base path `/api/v1`. Interactive docs at `/api/docs` (Swagger) and
 
 | Group | Prefix |
 |-------|--------|
-| Sign-in, sessions, password, API keys, `/me`, login options | `/auth` |
+| Sign-in (incl. `/login/mfa`), sessions, password, MFA (`/mfa`, `/mfa/setup`, `/mfa/enable`, `/mfa/disable`, `/mfa/recovery-codes`), API keys, `/me`, login options | `/auth` |
 | Operating mode (per tenant), readiness, health | `/mode`, `/health/live`, `/health/ready`, `/system` |
 | Dashboard, platform health | `/dashboard`, `/platform` |
 | Alerts, incidents, entities | `/alerts`, `/incidents`, `/entities` |

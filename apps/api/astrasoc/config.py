@@ -112,6 +112,10 @@ class Settings(BaseSettings):
     # in production. Set explicitly to force it on or off.
     cookie_secure: bool | None = None
     mfa_issuer: str = "ASTRASOC"
+    # The refresh token superseded by the latest rotation stays usable this
+    # many seconds, so a refresh whose response the browser lost (page
+    # navigation aborts it) doesn't look like theft. 0 disables the window.
+    refresh_reuse_grace_seconds: int = Field(default=30, ge=0, le=120)
 
     # --- Outbound egress policy (connectors + LLM providers) -------------
     # Link-local / cloud-metadata targets are always blocked.

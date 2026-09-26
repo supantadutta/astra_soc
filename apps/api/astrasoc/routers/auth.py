@@ -341,7 +341,10 @@ def refresh(request: Request, body: RefreshRequest | None = None,
             db: Session = Depends(get_db)) -> JSONResponse:
     """Rotate the refresh token (from the body, or the session cookie for
     browsers). Presenting an already-rotated token is treated as token theft:
-    the whole session is revoked."""
+    the whole session is revoked. The one exception is the token superseded
+    by the latest rotation, within `refresh_reuse_grace_seconds`: a browser
+    that navigates mid-refresh never receives the rotated cookie and
+    legitimately presents the previous one again."""
     delivery = "token"
     token = body.refresh_token if body and body.refresh_token else None
     if token is None:
@@ -359,14 +362,22 @@ def refresh(request: Request, body: RefreshRequest | None = None,
     if sess is None:
         reused = db.execute(select(SessionModel).where(
             SessionModel.previous_token_hash == token_hash)).scalar_one_or_none()
-        if reused is not None and reused.revoked_at is None:
-            reused.revoked_at = now
-            reused.revoked_reason = "refresh_token_reuse"
-            audit.record(db, action="auth.refresh_reuse_detected", actor_id=reused.user_id,
-                         outcome="failure", ip_address=_client_ip(request),
-                         detail={"session": str(reused.id)})
-            db.commit()
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired refresh token")
+        grace = settings.refresh_reuse_grace_seconds
+        if (reused is not None and reused.revoked_at is None and grace > 0
+                and reused.last_used_at is not None
+                and now - reused.last_used_at <= timedelta(seconds=grace)):
+            # Rotating again moves this token out of `previous`, so it is
+            # accepted at most once.
+            sess = reused
+        else:
+            if reused is not None and reused.revoked_at is None:
+                reused.revoked_at = now
+                reused.revoked_reason = "refresh_token_reuse"
+                audit.record(db, action="auth.refresh_reuse_detected", actor_id=reused.user_id,
+                             outcome="failure", ip_address=_client_ip(request),
+                             detail={"session": str(reused.id)})
+                db.commit()
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired refresh token")
     if sess.revoked_at is not None or sess.expires_at < now:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired refresh token")
     user = db.get(User, sess.user_id)

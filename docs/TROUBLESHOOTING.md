@@ -7,7 +7,11 @@ and that the API is healthy (`/api/v1/health/ready`).
 
 **401 on every request**
 Token expired or missing — log in again. The client auto-refreshes; if refresh
-fails you're redirected to `/login`.
+fails you're redirected to `/login`. Users signed out unexpectedly: check the
+audit log for `auth.refresh_reuse_detected`. It means a superseded refresh
+token was presented after the grace window
+(`ASTRASOC_REFRESH_REUSE_GRACE_SECONDS`), for example by a copied cookie or a
+client that retries refreshes; the session is revoked deliberately.
 
 **Login fails with correct password**
 - Demo accounts exist only in `demo`/`development`/`test` environments; the
@@ -30,6 +34,24 @@ set `ASTRASOC_AUTO_MIGRATE=true` for the schema.
 **403 `tenant_access_denied` after switching tenants**
 Your grant expired or was revoked, or the customer switched provider access
 off. The UI returns you to your home tenant automatically.
+
+**403 `csrf_failed`**
+A cookie-authenticated request that changes state did not send the
+`astrasoc_csrf` cookie value in `X-CSRF-Token`. The web app does this
+automatically; scripts should use a Bearer token or an API key instead of
+cookies.
+
+**403 `mfa_required` / sent back to sign-in**
+Your organization now requires two-step verification and this session was
+created without it. Sign in again; you will be asked to set it up.
+
+**403 `mfa_required_by_tenant` when switching into a customer**
+That customer requires two-step verification. Enable it in My Account, sign
+out, and sign in again with your code.
+
+**Lost authenticator**
+Use a recovery code at sign-in, or ask an administrator of your organization
+to reset your two-step verification (RBAC → Reset MFA).
 
 **403 `feature_not_in_plan`**
 The customer's service tier does not include the feature. Change the tier or

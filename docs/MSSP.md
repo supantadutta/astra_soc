@@ -53,6 +53,12 @@ Rules that always hold:
   roles may be granted. Provider staff cannot change this policy.
 - API keys are bound to the tenant that issued them and re-check delegation on
   each use.
+- **MFA:** a customer that requires two-step verification requires it of
+  everyone acting inside it. Provider staff can only enter with an
+  MFA-verified session (their API keys cannot enter at all), and the tenant
+  switcher marks such customers with a lock. The provider can impose the
+  requirement on a customer from the contract editor, but cannot lift one the
+  customer set.
 
 ## Service tiers and entitlements
 
