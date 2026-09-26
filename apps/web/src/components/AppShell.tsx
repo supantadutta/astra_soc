@@ -8,7 +8,7 @@ import {
   Bell, Building2, Check, ChevronDown, ChevronLeft, Command, Home, LogOut, Maximize2, Menu, Radio,
   Search, ShieldAlert, Sparkles, X, Zap,
 } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, takeFlash } from "@/lib/api";
 import { NAV, NAV_GROUPS } from "@/lib/nav";
 import { emitLive, useApp, useEventStream } from "@/lib/store";
 import type { AccessibleTenant, Notification } from "@/lib/types";
@@ -27,6 +27,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [pulse, setPulse] = useState(0);
   const [notifTick, setNotifTick] = useState(0);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [flash, setFlashState] = useState<string | null>(null);
+
+  useEffect(() => { setFlashState(takeFlash()); }, []);
 
   useEffect(() => {
     if (!loading && !me) router.replace("/login");
@@ -153,36 +156,37 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <button
             onClick={() => setPaletteOpen(true)}
             aria-label="Search"
-            className="flex items-center gap-2 text-sm text-ink-400 bg-navy-800/60 border border-white/5 rounded-lg px-2.5 sm:px-3 py-1.5 hover:border-cyan/30 sm:min-w-[160px]"
+            className="flex items-center gap-2 text-sm text-ink-400 bg-navy-800/60 border border-white/5 rounded-lg px-2.5 sm:px-3 py-1.5 hover:border-cyan/30 shrink-0 lg:min-w-[160px]"
           >
             <Search className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Search / Jump…</span>
-            <kbd className="ml-auto hidden md:flex items-center gap-0.5 text-[10px] text-ink-500">
+            <span className="hidden lg:inline">Search / Jump…</span>
+            <kbd className="ml-auto hidden lg:flex items-center gap-0.5 text-[10px] text-ink-500">
               <Command className="w-3 h-3" />K
             </kbd>
           </button>
 
           <TenantSwitcher />
 
-          <div className="flex-1" />
+          <div className="flex-1 min-w-0" />
 
+          <div className="flex items-center gap-1.5 sm:gap-2 md:gap-3 shrink-0">
           <ModeIndicator />
 
           <div
-            className={cx("hidden md:flex items-center gap-1.5 text-xs", connected ? "text-ink-400" : "text-amber")}
+            className={cx("hidden xl:flex items-center gap-1.5 text-xs", connected ? "text-ink-400" : "text-amber")}
             title={connected ? `Live stream connected · ${pulse} events received` : "Live stream disconnected — reconnecting"}
           >
             <Radio className={cx("w-3.5 h-3.5", connected ? "text-teal animate-pulseGlow" : "text-amber")} />
             <span className="tabular-nums">{connected ? "live" : "offline"}</span>
           </div>
 
-          <Link href="/wallboard" className="hidden sm:inline-flex btn-ghost !px-2 !py-1.5" title="Fullscreen SOC wallboard">
+          <Link href="/wallboard" className="hidden lg:inline-flex btn-ghost !px-2 !py-1.5" title="Fullscreen SOC wallboard">
             <Maximize2 className="w-4 h-4" />
           </Link>
 
           <button
             onClick={() => setReduceMotion((v) => !v)}
-            className={cx("hidden sm:inline-flex btn-ghost !px-2 !py-1.5", reduceMotion && "text-amber")}
+            className={cx("hidden lg:inline-flex btn-ghost !px-2 !py-1.5", reduceMotion && "text-amber")}
             title="Toggle animations (accessibility)"
             aria-pressed={reduceMotion}
           >
@@ -192,17 +196,26 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           {can("notification:read") && <NotificationBell tick={notifTick} />}
 
           <div className="flex items-center gap-2 pl-1 sm:pl-2 sm:border-l border-white/5 shrink-0">
-            <Link href="/account" className="hidden sm:block text-right leading-tight hover:opacity-80" title="My account">
-              <div className="text-xs text-ink-100 font-medium">{me.full_name}</div>
-              <div className="text-[10px] text-ink-500">{me.roles.map(titleCase).join(", ")}</div>
+            <Link href="/account" className="hidden xl:block text-right leading-tight hover:opacity-80 max-w-[180px]" title="My account">
+              <div className="text-xs text-ink-100 font-medium truncate">{me.full_name}</div>
+              <div className="text-[10px] text-ink-500 truncate">{me.roles.map(titleCase).join(", ")}</div>
             </Link>
             <button onClick={logout} className="btn-ghost !px-2 !py-1.5" title="Sign out" aria-label="Sign out">
               <LogOut className="w-4 h-4" />
             </button>
           </div>
+          </div>
         </header>
 
         <DelegationBanner />
+
+        {flash && (
+          <div role="status" className="bg-cyan/10 border-b border-cyan/30 text-cyan text-xs px-4 py-1.5 flex items-center gap-2">
+            <Icons.Info className="w-3.5 h-3.5 shrink-0" />
+            <span className="flex-1">{flash}</span>
+            <button onClick={() => setFlashState(null)} className="underline hover:no-underline">Dismiss</button>
+          </div>
+        )}
 
         {mode?.degraded && (
           <div className="bg-amber/10 border-b border-amber/30 text-amber text-xs px-4 py-1.5 flex items-center gap-2">
@@ -267,9 +280,9 @@ function TenantSwitcher() {
 
   if (!me || tenants.length <= 1) {
     return me ? (
-      <div className="hidden md:flex items-center gap-1.5 text-xs text-ink-300">
-        <Building2 className="w-3.5 h-3.5 text-ink-500" />
-        {me.tenant_name}
+      <div className="hidden lg:flex items-center gap-1.5 text-xs text-ink-300 min-w-0">
+        <Building2 className="w-3.5 h-3.5 text-ink-500 shrink-0" />
+        <span className="truncate">{me.tenant_name}</span>
       </div>
     ) : null;
   }
@@ -285,7 +298,7 @@ function TenantSwitcher() {
   };
 
   return (
-    <div className="relative" ref={ref}>
+    <div className="relative min-w-0" ref={ref}>
       <button
         onClick={() => setOpen((v) => !v)}
         className={cx(
@@ -335,6 +348,11 @@ function TenantSwitcher() {
                   <span className={cx("chip !text-[9px]", t.via === "break_glass" ? "text-crit border-crit/40" : "text-ink-400 border-white/10")}>
                     {VIA_LABEL[t.via] || t.via}
                   </span>
+                  {t.requires_mfa && (
+                    <span title={me.mfa_verified ? "Requires two-step verification" : "Requires two-step verification: sign in with MFA to enter"}>
+                      <Icons.Lock className={cx("w-3.5 h-3.5", me.mfa_verified ? "text-ink-500" : "text-amber")} />
+                    </span>
+                  )}
                   {t.status !== "active" && <span className="chip !text-[9px] text-amber border-amber/40">{t.status}</span>}
                   {active && <Check className="w-3.5 h-3.5 text-cyan" />}
                 </button>

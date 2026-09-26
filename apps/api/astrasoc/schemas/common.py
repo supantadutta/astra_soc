@@ -50,9 +50,17 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
+# Columns that must never leave the API, whatever the endpoint asks for.
+SENSITIVE_COLUMNS = frozenset({
+    "password_hash", "key_hash", "refresh_token_hash", "previous_token_hash",
+    "mfa_secret_enc", "mfa_pending_secret_enc", "mfa_recovery_hashes",
+})
+
+
 def serialize(obj: DeclarativeBase, exclude: set[str] | None = None) -> dict[str, Any]:
-    """Convert a SQLAlchemy model instance to a JSON-safe dict."""
-    exclude = exclude or set()
+    """Convert a SQLAlchemy model instance to a JSON-safe dict. Secret columns
+    (password/key/token hashes, MFA material) are always omitted."""
+    exclude = set(exclude or ()) | SENSITIVE_COLUMNS
     result: dict[str, Any] = {}
     for column in obj.__table__.columns:
         if column.name in exclude:

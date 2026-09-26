@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
-import { api, clearTokens, getActiveTenant, getToken, setActiveTenant, setTokens } from "./api";
+import { api, clearLocalSession, getActiveTenant, setActiveTenant } from "./api";
 import type { AccessibleTenant, Me, ModeState } from "./types";
 
 interface AppState {
@@ -11,7 +11,10 @@ interface AppState {
   tenants: AccessibleTenant[];
   /** Changes whenever the acting tenant changes — use as a React key. */
   tenantKey: string;
-  login: (email: string, password: string) => Promise<void>;
+  /** Password step. Resolves to "ok" (signed in) or a second-factor challenge. */
+  login: (email: string, password: string) => Promise<LoginResult>;
+  /** Reload the signed-in user after an MFA / enrollment step set the session. */
+  reloadSession: () => Promise<void>;
   logout: () => Promise<void>;
   refreshMode: () => Promise<void>;
   switchTenant: (tenantId: string | null) => Promise<void>;
@@ -20,6 +23,11 @@ interface AppState {
   /** Permission in the user's HOME tenant (MSSP portfolio features). */
   canHome: (perm: string) => boolean;
 }
+
+export type LoginResult =
+  | { status: "ok" }
+  | { status: "mfa"; mfaToken: string }
+  | { status: "enroll"; enrollmentToken: string };
 
 const Ctx = createContext<AppState | null>(null);
 
@@ -37,10 +45,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [tenantKey, setTenantKey] = useState("home");
 
   const loadMe = useCallback(async () => {
-    if (!getToken()) {
-      setLoading(false);
-      return;
-    }
+    // The session lives in HttpOnly cookies; /auth/me is the only way to know.
     try {
       const [meRes, modeRes, tenantRes] = await Promise.all([
         api.get<Me>("/auth/me"),
@@ -52,7 +57,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setTenants(tenantRes.items);
       setTenantKey(meRes.tenant_id);
     } catch {
-      clearTokens();
       setMe(null);
     } finally {
       setLoading(false);
@@ -63,24 +67,29 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     loadMe();
   }, [loadMe]);
 
-  const login = useCallback(async (email: string, password: string) => {
-    const res = await api.post<{ access_token: string; refresh_token: string }>("/auth/login", {
-      email,
-      password,
-    });
+  const login = useCallback(async (email: string, password: string): Promise<LoginResult> => {
+    const res = await api.post<any>("/auth/login", { email, password, session: "cookie" });
+    if (res?.mfa_required) return { status: "mfa", mfaToken: res.mfa_token };
+    if (res?.mfa_enrollment_required) return { status: "enroll", enrollmentToken: res.enrollment_token };
     setActiveTenant(null);
-    setTokens(res.access_token, res.refresh_token);
+    await loadMe();
+    return { status: "ok" };
+  }, [loadMe]);
+
+  const reloadSession = useCallback(async () => {
+    setActiveTenant(null);
     await loadMe();
   }, [loadMe]);
 
   const logout = useCallback(async () => {
     try {
-      await api.post("/auth/logout"); // revokes the server-side session
+      await api.post("/auth/logout"); // revokes the server-side session and clears cookies
     } catch {
       /* already expired — still clear locally */
     }
-    clearTokens();
-    setMe(null);
+    clearLocalSession();
+    // One hard navigation (it resets all client state). Clearing `me` first
+    // would make the shell redirect too, racing this navigation.
     window.location.href = "/login";
   }, []);
 
@@ -107,7 +116,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <Ctx.Provider
-      value={{ me, mode, loading, tenants, tenantKey, login, logout, refreshMode, switchTenant, can, canHome }}
+      value={{ me, mode, loading, tenants, tenantKey, login, reloadSession, logout, refreshMode, switchTenant, can, canHome }}
     >
       {children}
     </Ctx.Provider>

@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..db import GUID, Base
@@ -70,6 +70,13 @@ class User(UUIDMixin, TimestampMixin, Base):
     failed_login_count: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[datetime | None] = mapped_column(nullable=True)
     password_changed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    # MFA (TOTP). Secrets are Fernet-encrypted; recovery codes are hashed.
+    mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    mfa_secret_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mfa_pending_secret_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mfa_recovery_hashes: Mapped[list] = mapped_column(default=list)
+    mfa_last_step: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    mfa_enrolled_at: Mapped[datetime | None] = mapped_column(nullable=True)
     # ABAC attributes (e.g. clearance, allowed data classifications).
     attributes: Mapped[dict] = mapped_column(default=dict)
 
@@ -139,6 +146,8 @@ class Session(UUIDMixin, TimestampMixin, Base):
     previous_token_hash: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     last_used_at: Mapped[datetime | None] = mapped_column(nullable=True)
     revoked_reason: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    # Whether this session was established with a second factor.
+    mfa_verified: Mapped[bool] = mapped_column(Boolean, default=False)
     ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
     user_agent: Mapped[str | None] = mapped_column(String(400), nullable=True)
     expires_at: Mapped[datetime] = mapped_column()

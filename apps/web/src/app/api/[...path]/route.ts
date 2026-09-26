@@ -18,7 +18,10 @@ export const runtime = "nodejs";
 
 const API = (process.env.API_INTERNAL_URL || process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "");
 
-const FORWARD = ["authorization", "content-type", "accept", "x-api-key", "x-tenant-id", "x-request-id", "user-agent", "last-event-id"];
+const FORWARD = [
+  "authorization", "content-type", "accept", "x-api-key", "x-tenant-id", "x-request-id",
+  "user-agent", "last-event-id", "cookie", "x-csrf-token",
+];
 const TRUST_XFF = process.env.WEB_TRUST_FORWARDED_FOR === "true";
 const DROP_RESPONSE = new Set(["connection", "keep-alive", "transfer-encoding", "content-encoding", "content-length", "upgrade"]);
 
@@ -51,8 +54,11 @@ async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }
   }
   const out = new Headers();
   upstream.headers.forEach((value, key) => {
-    if (!DROP_RESPONSE.has(key.toLowerCase())) out.set(key, value);
+    const k = key.toLowerCase();
+    if (!DROP_RESPONSE.has(k) && k !== "set-cookie") out.set(key, value);
   });
+  // Session cookies: every Set-Cookie must pass through (set() would keep one).
+  for (const cookie of upstream.headers.getSetCookie()) out.append("set-cookie", cookie);
   if ((upstream.headers.get("content-type") || "").includes("text/event-stream")) {
     out.set("x-accel-buffering", "no");
     out.set("cache-control", "no-cache, no-transform");

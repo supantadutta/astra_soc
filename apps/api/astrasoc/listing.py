@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import String, asc, cast, desc, func, or_, select
 from sqlalchemy.orm import Session
 
-from .schemas.common import serialize_many
+from .schemas.common import SENSITIVE_COLUMNS, serialize_many
 
 
 def paginate(
@@ -48,7 +48,7 @@ def paginate(
     total = db.execute(count_stmt).scalar() or 0
 
     # Only real, non-sensitive columns are sortable (never an arbitrary attribute).
-    columns = {c.name for c in model.__table__.columns} - {"password_hash", "key_hash"}
+    columns = {c.name for c in model.__table__.columns} - SENSITIVE_COLUMNS
     sort_col = getattr(model, sort) if sort in columns else None
     if sort_col is None:
         sort_col = getattr(model, "created_at", None) or model.id

@@ -246,7 +246,7 @@ _TENANT_TABLES = [
     EntityRelationship, Alert, Incident, Entity, SecurityEvent, ThreatIndicator,
     DetectionRule, ModelRoute, PromptTemplate, UsageCounter, APIKey, SystemSetting,
 ]
-_EXPORT_EXCLUDE = {APIKey: {"key_hash"}, User: {"password_hash"}}
+_EXPORT_EXCLUDE = {APIKey: {"key_hash"}, User: {"password_hash"}}  # plus SENSITIVE_COLUMNS, always
 
 
 def export_tenant(db: Session, tenant: Tenant) -> dict:

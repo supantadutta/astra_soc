@@ -12,6 +12,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from .auth.sessions import ACCESS_COOKIE
 from .config import settings
 
 MAX_BODY_BYTES = 5 * 1024 * 1024
@@ -108,8 +109,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if path in ("/health", "/api/v1/health/live", "/api/v1/health/ready", "/api/v1/stream"):
             return await call_next(request)
         ip = client_ip(request)
-        is_auth = path in ("/api/v1/auth/login", "/api/v1/auth/refresh")
-        credential = request.headers.get("authorization") or request.headers.get("x-api-key")
+        is_auth = path in ("/api/v1/auth/login", "/api/v1/auth/login/mfa", "/api/v1/auth/refresh",
+                           "/api/v1/auth/mfa/enable")
+        credential = (request.headers.get("authorization") or request.headers.get("x-api-key")
+                      or request.cookies.get(ACCESS_COOKIE))
         if is_auth:
             key = f"auth:{ip}"
         elif credential:

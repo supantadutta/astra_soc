@@ -103,6 +103,15 @@ class Settings(BaseSettings):
     allow_unsafe_secret_schemes: bool = False
     # Separate HMAC key for the audit chain (falls back to jwt_secret).
     audit_key: str | None = None
+    # Key for encrypting sensitive columns (MFA secrets). Falls back to the
+    # audit key. Rotating it invalidates enrolled authenticators.
+    data_encryption_key: str | None = None
+
+    # --- Browser sessions ------------------------------------------------
+    # Session cookies are HttpOnly + SameSite=Strict; Secure defaults to on
+    # in production. Set explicitly to force it on or off.
+    cookie_secure: bool | None = None
+    mfa_issuer: str = "ASTRASOC"
 
     # --- Outbound egress policy (connectors + LLM providers) -------------
     # Link-local / cloud-metadata targets are always blocked.
@@ -125,6 +134,10 @@ class Settings(BaseSettings):
         if self.seed_demo_users is not None:
             return self.seed_demo_users
         return self.environment in ("demo", "development", "test")
+
+    @property
+    def secure_cookies(self) -> bool:
+        return self.is_production if self.cookie_secure is None else self.cookie_secure
 
     @property
     def audit_signing_key(self) -> str:
@@ -161,6 +174,10 @@ def production_problems(s: Settings) -> list[str]:
         problems.append("ASTRASOC_SEED_DEMO_USERS must not be enabled in production.")
     if s.allow_unsafe_secret_schemes:
         problems.append("ASTRASOC_ALLOW_UNSAFE_SECRET_SCHEMES must be false in production.")
+    if s.data_encryption_key and len(s.data_encryption_key) < 32:
+        problems.append("ASTRASOC_DATA_ENCRYPTION_KEY, when set, must be at least 32 characters.")
+    if s.cookie_secure is False:
+        problems.append("ASTRASOC_COOKIE_SECURE must not be false in production (TLS is required).")
     return problems
 
 

@@ -209,6 +209,7 @@ function EditModal({ id, catalog, onClose, onDone }: { id: string; catalog: Cata
     feature_overrides: data.settings?.feature_overrides || {},
     sla_policy: data.sla_policy || {},
     customer_approval_actions: (data.settings?.customer_approval_actions || []).join(", "),
+    require_mfa: !!data.security?.require_mfa,
   };
   const upd = (patch: any) => setDraft({ ...d, ...patch });
   const tierFeatures = new Set(catalog.tiers[d.service_tier]?.features || []);
@@ -226,6 +227,7 @@ function EditModal({ id, catalog, onClose, onDone }: { id: string; catalog: Cata
       contract_start: d.contract_start || null, contract_end: d.contract_end || null,
       feature_overrides: d.feature_overrides, sla_policy: sla,
       customer_approval_actions: String(d.customer_approval_actions).split(",").map((s) => s.trim()).filter(Boolean),
+      ...(d.require_mfa !== !!data.security?.require_mfa ? { require_mfa: d.require_mfa } : {}),
     }), "Contract updated. The change is recorded in both your and the customer's audit trail.");
     if (ok) onDone();
   };
@@ -292,6 +294,19 @@ function EditModal({ id, catalog, onClose, onDone }: { id: string; catalog: Cata
           </div>
         ))}
       </div>
+
+      <label className="flex items-start gap-2 text-sm mb-4">
+        <input type="checkbox" className="mt-1" checked={d.require_mfa}
+          disabled={!!data.security?.require_mfa && data.security?.require_mfa_set_by === "customer"}
+          onChange={(e) => upd({ require_mfa: e.target.checked })} />
+        <span>
+          Require two-step verification in this tenant
+          <span className="block text-xs text-ink-500">
+            Binds the customer&apos;s users and your own staff entering it.
+            {data.security?.require_mfa_set_by === "customer" && " Set by the customer; only they can lift it."}
+          </span>
+        </span>
+      </label>
 
       <Field label="Actions requiring customer approval" hint="Comma-separated response action types (e.g. isolate_host, disable_user). Recorded on the contract for reference only; the response gateway does not enforce it yet (see Known Limitations).">
         <input className="input" value={d.customer_approval_actions} onChange={(e) => upd({ customer_approval_actions: e.target.value })} />

@@ -1,11 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { Copy, KeyRound, LogOut, Plus } from "lucide-react";
+import { Copy, KeyRound, LogOut, Plus, ShieldCheck, ShieldOff } from "lucide-react";
 import { api } from "@/lib/api";
 import { useApi, useApp } from "@/lib/store";
 import { DataTable, ErrorState, Modal, PageHeader, Panel, Skeleton } from "@/components/ui";
 import { Field, ResultBanner, useAction } from "@/components/mssp";
+import { MfaEnroll, RecoveryCodes } from "@/components/MfaEnroll";
 import { fmtDate, timeAgo, titleCase } from "@/lib/ui";
 
 interface Sess { id: string; ip_address: string | null; user_agent: string | null; created_at: string; expires_at: string; last_used_at: string | null; revoked: boolean; revoked_reason: string | null; current: boolean }
@@ -56,6 +57,8 @@ export default function AccountPage() {
           </form>
         </Panel>
       </div>
+
+      <MfaPanel />
 
       <Panel title="Active sessions" className="mb-3">
         {sessions.error ? <ErrorState message={sessions.error.message} /> : !sessions.data ? <Skeleton rows={3} /> : (
@@ -159,5 +162,89 @@ function NewKeyModal({ permissions, onClose }: { permissions: string[]; onClose:
         </div>
       )}
     </Modal>
+  );
+}
+
+interface MfaStatus { enabled: boolean; enrolled_at: string | null; recovery_codes_remaining: number; session_verified: boolean; tenant_requires_mfa: boolean }
+
+function MfaPanel() {
+  const { reloadSession } = useApp();
+  const status = useApi<MfaStatus>("/auth/mfa");
+  const action = useAction();
+  const [mode, setMode] = useState<"idle" | "enroll" | "codes" | "regen" | "disable">("idle");
+  const [codes, setCodes] = useState<string[]>([]);
+  const [code, setCode] = useState("");
+  const [password, setPassword] = useState("");
+  const s = status.data;
+
+  const regenerate = async () => {
+    await action.run(async () => {
+      const res = await api.post<{ recovery_codes: string[] }>("/auth/mfa/recovery-codes", { code });
+      setCodes(res.recovery_codes);
+      setMode("codes");
+    }, "New recovery codes generated; the old ones no longer work.");
+    setCode("");
+  };
+  const disable = async () => {
+    const ok = await action.run(() => api.post("/auth/mfa/disable", { password, code }), "Two-step verification turned off.");
+    setCode(""); setPassword("");
+    if (ok) { setMode("idle"); status.reload(); }
+  };
+
+  return (
+    <Panel title="Two-step verification" className="mb-3"
+      actions={s && (s.enabled
+        ? <span className="chip text-teal border-teal/40 bg-teal/10"><ShieldCheck className="w-3 h-3" /> On</span>
+        : <span className="chip text-amber border-amber/40 bg-amber/10"><ShieldOff className="w-3 h-3" /> Off</span>)}>
+      <ResultBanner result={action.result} />
+      {!s ? <Skeleton rows={2} /> : mode === "enroll" ? (
+        <div className="max-w-md">
+          <MfaEnroll onEnrolled={(c) => { setCodes(c); setMode("codes"); }} />
+          <button className="text-xs text-ink-400 hover:text-cyan mt-3" onClick={() => setMode("idle")}>Cancel</button>
+        </div>
+      ) : mode === "codes" ? (
+        <div className="max-w-md">
+          <RecoveryCodes codes={codes} onDone={() => { setMode("idle"); setCodes([]); status.reload(); reloadSession(); }} />
+        </div>
+      ) : !s.enabled ? (
+        <div className="space-y-2">
+          <p className="text-sm text-ink-300">
+            Protect your account with an authenticator app. {s.tenant_requires_mfa
+              ? "Your organization requires it."
+              : "Customers that require MFA will only let you in with it."}
+          </p>
+          <button className="btn-primary" onClick={() => setMode("enroll")}><ShieldCheck className="w-4 h-4" /> Set up</button>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <div className="text-sm text-ink-300">
+            Enabled {s.enrolled_at ? fmtDate(s.enrolled_at) : ""} · {s.recovery_codes_remaining} recovery codes left
+            {s.recovery_codes_remaining <= 3 && <span className="text-amber"> (running low)</span>}
+            {!s.session_verified && <span className="text-amber"> · this session signed in without it</span>}
+          </div>
+          {mode === "idle" && (
+            <div className="flex flex-wrap gap-2">
+              <button className="btn-ghost" onClick={() => setMode("regen")}>New recovery codes</button>
+              <button className="btn-ghost text-crit" disabled={s.tenant_requires_mfa} onClick={() => setMode("disable")}
+                title={s.tenant_requires_mfa ? "Your organization requires MFA" : undefined}>Turn off</button>
+            </div>
+          )}
+          {(mode === "regen" || mode === "disable") && (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2 items-end max-w-2xl">
+              {mode === "disable" && (
+                <Field label="Password"><input className="input" type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} /></Field>
+              )}
+              <Field label="Current code"><input className="input font-mono" inputMode="numeric" maxLength={6} autoComplete="one-time-code" value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))} /></Field>
+              <div className="flex gap-2">
+                <button className="btn-ghost" onClick={() => { setMode("idle"); setCode(""); setPassword(""); }}>Cancel</button>
+                {mode === "regen"
+                  ? <button className="btn-primary" disabled={code.length !== 6 || action.busy} onClick={regenerate}>Generate</button>
+                  : <button className="btn-danger" disabled={code.length !== 6 || !password || action.busy} onClick={disable}>Turn off</button>}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </Panel>
   );
 }

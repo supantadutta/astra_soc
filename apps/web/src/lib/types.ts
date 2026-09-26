@@ -13,6 +13,9 @@ export interface Me {
   home_tenant_slug: string;
   home_permissions: string[];
   delegated_via: "platform" | "break_glass" | "provider" | "grant" | null;
+  mfa_enabled: boolean;
+  mfa_verified: boolean;
+  tenant_requires_mfa: boolean;
 }
 
 /** A tenant the user may act in (drives the tenant switcher). */
@@ -27,6 +30,7 @@ export interface AccessibleTenant {
   role: string;
   via: "home" | "platform" | "break_glass" | "provider" | "grant";
   branding: Record<string, any>;
+  requires_mfa: boolean;
 }
 
 export interface SlaTarget {

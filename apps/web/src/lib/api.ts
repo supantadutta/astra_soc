@@ -5,13 +5,18 @@
  * `/api/*` proxy route. RBAC and tenant isolation are enforced server-side;
  * a 403 here means the backend declined, and the UI surfaces that truthfully.
  *
+ * Session: the browser holds HttpOnly cookies set by the API, so page
+ * JavaScript never sees an access or refresh token. State-changing requests
+ * echo the readable CSRF cookie in `X-CSRF-Token` (double-submit).
+ *
  * MSSP tenant context: when the user switches into a customer tenant, every
  * request carries `X-Tenant-ID`. The backend re-evaluates delegated access on
  * each request, so revoking a grant takes effect immediately.
  *
  * Refresh tokens rotate and replaying a superseded one revokes the session
- * (theft detection), so refreshes are serialised — within this tab through a
- * shared promise and across tabs through the Web Locks API.
+ * (theft detection), so refreshes are serialised: within this tab through a
+ * shared promise, across tabs through the Web Locks API plus a timestamp other
+ * tabs can see.
  */
 
 export interface ApiError {
@@ -22,9 +27,11 @@ export interface ApiError {
   request_id?: string;
 }
 
-const TOKEN_KEY = "astrasoc.access";
-const REFRESH_KEY = "astrasoc.refresh";
 const TENANT_KEY = "astrasoc.tenant";
+const REFRESHED_AT_KEY = "astrasoc.refreshedAt";
+const FLASH_KEY = "astrasoc.flash";
+const CSRF_COOKIE = "astrasoc_csrf";
+const UNSAFE = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 function store(): Storage | null {
   try {
@@ -34,16 +41,14 @@ function store(): Storage | null {
   }
 }
 
-export function getToken(): string | null {
-  return store()?.getItem(TOKEN_KEY) ?? null;
+function readCookie(name: string): string | null {
+  if (typeof document === "undefined") return null;
+  const hit = document.cookie.split("; ").find((c) => c.startsWith(name + "="));
+  return hit ? decodeURIComponent(hit.slice(name.length + 1)) : null;
 }
-export function setTokens(access: string, refresh: string) {
-  store()?.setItem(TOKEN_KEY, access);
-  store()?.setItem(REFRESH_KEY, refresh);
-}
-export function clearTokens() {
-  store()?.removeItem(TOKEN_KEY);
-  store()?.removeItem(REFRESH_KEY);
+
+/** Forget client-side session state (the cookies are cleared by /auth/logout). */
+export function clearLocalSession() {
   store()?.removeItem(TENANT_KEY);
 }
 
@@ -56,12 +61,32 @@ export function setActiveTenant(tenantId: string | null) {
   else store()?.removeItem(TENANT_KEY);
 }
 
-function authHeaders(extra?: Record<string, string>): Record<string, string> {
+/** One-shot message shown by the shell after a redirect. */
+export function setFlash(message: string) {
+  try {
+    sessionStorage.setItem(FLASH_KEY, message);
+  } catch {
+    /* ignore */
+  }
+}
+export function takeFlash(): string | null {
+  try {
+    const m = sessionStorage.getItem(FLASH_KEY);
+    sessionStorage.removeItem(FLASH_KEY);
+    return m;
+  } catch {
+    return null;
+  }
+}
+
+function buildHeaders(method: string, extra?: Record<string, string>): Record<string, string> {
   const headers: Record<string, string> = { ...(extra || {}) };
-  const token = getToken();
-  if (token) headers["Authorization"] = `Bearer ${token}`;
   const tenant = getActiveTenant();
   if (tenant) headers["X-Tenant-ID"] = tenant;
+  if (UNSAFE.has(method)) {
+    const csrf = readCookie(CSRF_COOKIE);
+    if (csrf) headers["X-CSRF-Token"] = csrf;
+  }
   return headers;
 }
 
@@ -88,30 +113,42 @@ async function toError(res: Response): Promise<ApiError> {
   };
 }
 
+const PUBLIC_AUTH = ["/auth/login", "/auth/login/mfa", "/auth/login-options", "/auth/mfa/setup", "/auth/mfa/enable"];
+
 async function send(method: string, path: string, body: unknown, retry: boolean): Promise<Response> {
-  const usedToken = getToken();
+  const startedAt = Date.now();
   const res = await fetch(`/api/v1${path}`, {
     method,
-    headers: authHeaders(body !== undefined ? { "Content-Type": "application/json" } : undefined),
+    headers: buildHeaders(method, body !== undefined ? { "Content-Type": "application/json" } : undefined),
     body: body !== undefined ? JSON.stringify(body) : undefined,
     cache: "no-store",
+    credentials: "same-origin",
   });
-  if (res.status === 401 && retry && typeof window !== "undefined" && !path.startsWith("/auth/login")) {
-    if (await refreshSession(usedToken)) return send(method, path, body, false);
-    clearTokens();
+  if (res.status === 401 && retry && typeof window !== "undefined" && !PUBLIC_AUTH.includes(path)) {
+    if (await refreshSession(startedAt)) return send(method, path, body, false);
+    clearLocalSession();
     if (!window.location.pathname.startsWith("/login")) window.location.href = "/login";
   }
-  // The acting tenant was switched off or access revoked: fall back home.
-  if (res.status === 403 && getActiveTenant()) {
-    const clone = res.clone();
+  if (res.status === 403 && typeof window !== "undefined") {
+    let code = "";
     try {
-      const p = await clone.json();
-      if ((p?.detail?.error || p?.error) === "tenant_access_denied") {
-        setActiveTenant(null);
-        window.location.href = "/dashboard";
-      }
+      const p = await res.clone().json();
+      code = p?.detail?.error || p?.error || "";
     } catch {
       /* ignore */
+    }
+    if (code === "mfa_required") {
+      // The organization now requires MFA and this session predates it.
+      await fetch("/api/v1/auth/logout", { method: "POST", headers: buildHeaders("POST"), credentials: "same-origin" }).catch(() => undefined);
+      clearLocalSession();
+      window.location.href = "/login?reason=mfa_required";
+    } else if ((code === "tenant_access_denied" || code === "mfa_required_by_tenant") && getActiveTenant()) {
+      // The acting tenant was switched off, access revoked, or it requires MFA.
+      setActiveTenant(null);
+      if (code === "mfa_required_by_tenant") {
+        setFlash("That customer requires multi-factor authentication. Enable MFA in My Account, then sign in again with it.");
+      }
+      window.location.href = "/mssp";
     }
   }
   return res;
@@ -127,23 +164,20 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 
 let inflight: Promise<boolean> | null = null;
 
-/** Refresh once for everyone waiting. `staleToken` is the access token the
- * failed request used: if another tab already rotated it, just retry. */
-function refreshSession(staleToken: string | null): Promise<boolean> {
+/** Refresh once for everyone waiting. If another tab refreshed after our
+ * request started, its new cookies are already ours: just retry. */
+function refreshSession(startedAt: number): Promise<boolean> {
   if (!inflight) {
     const run = async () => {
-      if (getToken() && getToken() !== staleToken) return true;
-      const refresh = store()?.getItem(REFRESH_KEY);
-      if (!refresh) return false;
+      if (Number(store()?.getItem(REFRESHED_AT_KEY) || 0) > startedAt) return true;
       try {
         const res = await fetch(`/api/v1/auth/refresh`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ refresh_token: refresh }),
+          headers: buildHeaders("POST"),
+          credentials: "same-origin",
         });
         if (!res.ok) return false;
-        const data = await res.json();
-        setTokens(data.access_token, data.refresh_token);
+        store()?.setItem(REFRESHED_AT_KEY, String(Date.now()));
         return true;
       } catch {
         return false;

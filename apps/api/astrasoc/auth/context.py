@@ -27,6 +27,10 @@ class Principal:
     home_permissions: list[str] = field(default_factory=list)
     delegated_via: str | None = None  # platform | break_glass | provider | grant
     grant_id: uuid.UUID | None = None
+    # Authentication strength of this request.
+    mfa_verified: bool = False       # interactive session established with a second factor
+    via_api_key: bool = False
+    via_cookie: bool = False
 
     @property
     def is_platform_admin(self) -> bool:

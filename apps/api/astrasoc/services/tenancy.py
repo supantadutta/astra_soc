@@ -57,6 +57,7 @@ class AccessDecision:
             "status": t.status, "service_tier": t.service_tier, "region": t.region,
             "role": self.role_name, "via": self.via,
             "branding": t.branding or {},
+            "requires_mfa": bool(((t.settings or {}).get("security") or {}).get("require_mfa")),
         }
 
 

@@ -5,11 +5,13 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..auth import mfa
 from ..auth.context import Principal
-from ..auth.deps import get_current_principal
+from ..auth.deps import get_current_principal, get_optional_principal
 from ..auth.permissions import grant_violations
 from ..auth.security import (
     create_access_token,
@@ -21,6 +23,7 @@ from ..auth.security import (
     password_policy_errors,
     verify_password,
 )
+from ..auth.sessions import REFRESH_COOKIE, clear_session_cookies, csrf_ok, set_session_cookies
 from ..config import settings
 from ..db import get_db
 from ..models import APIKey, Tenant, User
@@ -30,8 +33,8 @@ from ..schemas.auth import (
     APIKeyCreated,
     LoginRequest,
     MeResponse,
+    MFALoginRequest,
     RefreshRequest,
-    TokenResponse,
 )
 from ..services import audit
 from ..services.mode import current_scope
@@ -50,7 +53,8 @@ def _client_ip(request: Request) -> str | None:
     return getattr(request.state, "client_ip", None) or (request.client.host if request.client else None)
 
 
-def _issue(db: Session, user: User, request: Request) -> TokenResponse:
+def _create_session(db: Session, user: User, request: Request, *,
+                    mfa_verified: bool) -> tuple[str, str]:
     sid = uuid.uuid4().hex
     access = create_access_token({"sub": str(user.id), "tid": str(user.tenant_id), "sid": sid})
     refresh, exp = create_refresh_token({"sub": str(user.id), "sid": sid})
@@ -58,10 +62,56 @@ def _issue(db: Session, user: User, request: Request) -> TokenResponse:
         user_id=user.id, sid=sid, refresh_token_hash=hash_token(refresh),
         ip_address=_client_ip(request),
         user_agent=request.headers.get("user-agent", "")[:400], expires_at=exp,
-        last_used_at=datetime.now(UTC),
+        last_used_at=datetime.now(UTC), mfa_verified=mfa_verified,
     ))
-    return TokenResponse(access_token=access, refresh_token=refresh,
-                         expires_in=settings.access_token_ttl_seconds)
+    return access, refresh
+
+
+def _session_response(access: str, refresh: str, delivery: str, extra: dict | None = None,
+                      status_code: int = 200) -> JSONResponse:
+    """``cookie``: HttpOnly cookies (browsers; tokens never reach page
+    JavaScript). ``token``: tokens in the body (CLIs and integrations)."""
+    body: dict = {"token_type": "cookie" if delivery == "cookie" else "bearer",
+                  "expires_in": settings.access_token_ttl_seconds, **(extra or {})}
+    if delivery != "cookie":
+        body.update(access_token=access, refresh_token=refresh)
+    response = JSONResponse(body, status_code=status_code)
+    if delivery == "cookie":
+        set_session_cookies(response, access, refresh)
+    return response
+
+
+def _complete_login(db: Session, user: User, request: Request, delivery: str, *,
+                    method: str, extra: dict | None = None) -> JSONResponse:
+    """Final step of every successful sign-in (password, MFA or enrollment)."""
+    user.failed_login_count = 0
+    user.locked_until = None
+    user.last_login_at = datetime.now(UTC)
+    access, refresh = _create_session(db, user, request, mfa_verified=method != "password")
+    audit.record(db, action="auth.login", actor_id=user.id, actor_label=user.email,
+                 tenant_id=user.tenant_id, data_scope=current_scope(db, user.tenant_id),
+                 ip_address=_client_ip(request), detail={"method": method})
+    db.commit()
+    return _session_response(access, refresh, delivery, extra)
+
+
+def _register_failure(db: Session, user: User, request: Request, *, stage: str) -> None:
+    now = datetime.now(UTC)
+    user.failed_login_count = (user.failed_login_count or 0) + 1
+    if user.failed_login_count >= settings.login_max_failures:
+        user.locked_until = now + timedelta(minutes=settings.login_lockout_minutes)
+        user.failed_login_count = 0
+        audit.record(db, action="auth.account_locked", actor_id=user.id,
+                     actor_label=user.email, tenant_id=user.tenant_id, outcome="failure",
+                     data_scope=current_scope(db, user.tenant_id), ip_address=_client_ip(request),
+                     detail={"minutes": settings.login_lockout_minutes, "stage": stage})
+
+
+def _usable(db: Session, user: User | None) -> bool:
+    if user is None or not user.is_active:
+        return False
+    tenant = db.get(Tenant, user.tenant_id)
+    return tenant is not None and tenant.is_active
 
 
 @router.get("/login-options")
@@ -72,8 +122,12 @@ def login_options() -> dict:
             "environment": "demo" if settings.should_seed_demo_users else "standard"}
 
 
-@router.post("/login", response_model=TokenResponse)
-def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)) -> TokenResponse:
+@router.post("/login")
+def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)) -> JSONResponse:
+    """Password step. Returns a session, or — when a second factor is needed —
+    a short-lived challenge token for ``/auth/login/mfa`` (enrolled users) or
+    ``/auth/mfa/setup`` + ``/auth/mfa/enable`` (tenant requires MFA, user not
+    enrolled yet). A challenge token grants nothing else."""
     email = normalize_email(body.email)
     user = db.execute(select(User).where(User.email == email)).scalar_one_or_none()
     now = datetime.now(UTC)
@@ -82,42 +136,223 @@ def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)) -
     locked = bool(user and user.locked_until and user.locked_until > now)
     if user is None or locked or not verify_password(body.password, user.password_hash):
         if user is not None and not locked:
-            user.failed_login_count = (user.failed_login_count or 0) + 1
-            if user.failed_login_count >= settings.login_max_failures:
-                user.locked_until = now + timedelta(minutes=settings.login_lockout_minutes)
-                user.failed_login_count = 0
-                audit.record(db, action="auth.account_locked", actor_id=user.id,
-                             actor_label=user.email, tenant_id=user.tenant_id, outcome="failure",
-                             data_scope=current_scope(db, user.tenant_id), ip_address=ip,
-                             detail={"minutes": settings.login_lockout_minutes})
+            _register_failure(db, user, request, stage="password")
         audit.record(
             db, action="auth.login_failed", actor_type="user", outcome="failure",
             tenant_id=user.tenant_id if user else None,
             data_scope=current_scope(db, user.tenant_id if user else None), ip_address=ip,
-            detail={"email": email, "locked": locked},
+            detail={"email": email, "locked": locked, "stage": "password"},
         )
         db.commit()
         raise _invalid()
-    tenant = db.get(Tenant, user.tenant_id)
-    if not user.is_active or tenant is None or not tenant.is_active:
+    if not _usable(db, user):
         raise _invalid()
 
-    user.failed_login_count = 0
-    user.locked_until = None
-    user.last_login_at = now
-    tokens = _issue(db, user, request)
-    audit.record(db, action="auth.login", actor_id=user.id, actor_label=user.email,
-                 tenant_id=user.tenant_id, data_scope=current_scope(db, user.tenant_id),
-                 ip_address=ip)
+    # The password is right, but the failure counter is only reset once the
+    # whole sign-in (including any second factor) succeeds.
+    if user.mfa_enabled:
+        db.commit()
+        return JSONResponse({"mfa_required": True, "mfa_token": mfa.issue_challenge(user.id, "mfa"),
+                             "methods": ["totp", "recovery_code"]})
+    tenant = db.get(Tenant, user.tenant_id)
+    if mfa.tenant_requires_mfa(tenant) and not user.is_service_account:
+        db.commit()
+        return JSONResponse({"mfa_enrollment_required": True,
+                             "enrollment_token": mfa.issue_challenge(user.id, "mfa_enroll")})
+    return _complete_login(db, user, request, body.session, method="password")
+
+
+@router.post("/login/mfa")
+def login_mfa(body: MFALoginRequest, request: Request, db: Session = Depends(get_db)) -> JSONResponse:
+    """Second-factor step: a TOTP code or a single-use recovery code."""
+    user_id = mfa.read_challenge(body.mfa_token, "mfa")
+    user = db.get(User, user_id) if user_id else None
+    now = datetime.now(UTC)
+    if user is None or not user.mfa_enabled or not _usable(db, user) \
+            or (user.locked_until and user.locked_until > now):
+        raise _invalid()
+    method, extra = None, {}
+    if body.code:
+        secret = mfa.decrypt_secret(user.mfa_secret_enc)
+        step = mfa.verify_totp(secret, body.code, user.mfa_last_step) if secret else None
+        if step is not None:
+            user.mfa_last_step = step
+            method = "totp"
+    elif body.recovery_code:
+        remaining = mfa.consume_recovery_code(body.recovery_code, list(user.mfa_recovery_hashes or []))
+        if remaining is not None:
+            user.mfa_recovery_hashes = remaining
+            method = "recovery_code"
+            extra = {"recovery_codes_remaining": len(remaining)}
+    if method is None:
+        _register_failure(db, user, request, stage="mfa")
+        audit.record(db, action="auth.login_failed", actor_id=user.id, actor_label=user.email,
+                     tenant_id=user.tenant_id, outcome="failure",
+                     data_scope=current_scope(db, user.tenant_id), ip_address=_client_ip(request),
+                     detail={"stage": "mfa"})
+        db.commit()
+        raise _invalid()
+    return _complete_login(db, user, request, body.session, method=method, extra=extra)
+
+
+# --- MFA management ----------------------------------------------------------------
+def _mfa_subject(db: Session, principal: Principal | None, enrollment_token: str | None) -> User:
+    if principal is not None and principal.session_id:
+        user = db.get(User, principal.user_id)
+    else:
+        user_id = mfa.read_challenge(enrollment_token or "", "mfa_enroll")
+        user = db.get(User, user_id) if user_id else None
+    if user is None or not _usable(db, user):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail={
+            "error": "unauthorized", "message": "Sign in (or use a valid enrollment token) first."})
+    return user
+
+
+@router.get("/mfa")
+def mfa_status(principal: Principal = Depends(get_current_principal),
+               db: Session = Depends(get_db)) -> dict:
+    user = db.get(User, principal.user_id)
+    home = db.get(Tenant, principal.home_tenant_id)
+    return {"enabled": bool(user.mfa_enabled),
+            "enrolled_at": user.mfa_enrolled_at.isoformat() if user.mfa_enrolled_at else None,
+            "recovery_codes_remaining": len(user.mfa_recovery_hashes or []),
+            "session_verified": principal.mfa_verified,
+            "tenant_requires_mfa": mfa.tenant_requires_mfa(home)}
+
+
+@router.post("/mfa/setup")
+def mfa_setup(payload: dict = Body(default={}),
+              principal: Principal | None = Depends(get_optional_principal),
+              db: Session = Depends(get_db)) -> dict:
+    """Start enrollment: returns a new secret and its otpauth:// URI (render as
+    a QR code). Nothing changes until /mfa/enable confirms a code."""
+    user = _mfa_subject(db, principal, payload.get("enrollment_token"))
+    if user.mfa_enabled:
+        raise HTTPException(409, detail={"error": "mfa_already_enabled",
+                                         "message": "MFA is already enabled for this account."})
+    secret = mfa.generate_secret()
+    user.mfa_pending_secret_enc = mfa.encrypt_secret(secret)
     db.commit()
-    return tokens
+    return {"secret": secret, "otpauth_uri": mfa.provisioning_uri(secret, user.email, settings.mfa_issuer),
+            "digits": mfa.DIGITS, "period": mfa.STEP_SECONDS}
 
 
-@router.post("/refresh", response_model=TokenResponse)
-def refresh(body: RefreshRequest, request: Request, db: Session = Depends(get_db)) -> TokenResponse:
-    """Rotate the refresh token. Presenting an already-rotated token is treated
-    as token theft: the whole session is revoked."""
-    token_hash = hash_token(body.refresh_token)
+@router.post("/mfa/enable")
+def mfa_enable(request: Request, payload: dict = Body(...),
+               principal: Principal | None = Depends(get_optional_principal),
+               db: Session = Depends(get_db)) -> JSONResponse:
+    """Confirm enrollment with a code from the authenticator. Returns the
+    recovery codes (shown once). In the enrollment-token flow this also
+    completes the sign-in."""
+    enrollment_token = payload.get("enrollment_token")
+    user = _mfa_subject(db, principal, enrollment_token)
+    secret = mfa.decrypt_secret(user.mfa_pending_secret_enc)
+    if user.mfa_enabled or not secret:
+        raise HTTPException(409, detail={"error": "no_pending_enrollment",
+                                         "message": "Start enrollment with /auth/mfa/setup first."})
+    step = mfa.verify_totp(secret, str(payload.get("code", "")), None)
+    if step is None:
+        _register_failure(db, user, request, stage="mfa_enroll")
+        db.commit()
+        raise HTTPException(422, detail={"error": "invalid_code",
+                                         "message": "That code is not valid. Check the device clock and try again."})
+    codes = mfa.generate_recovery_codes()
+    user.mfa_secret_enc, user.mfa_pending_secret_enc = user.mfa_pending_secret_enc, None
+    user.mfa_enabled, user.mfa_last_step = True, step
+    user.mfa_enrolled_at = datetime.now(UTC)
+    user.mfa_recovery_hashes = [mfa.hash_recovery_code(c) for c in codes]
+    audit.record(db, action="auth.mfa_enabled", actor_id=user.id, actor_label=user.email,
+                 tenant_id=user.tenant_id, data_scope=current_scope(db, user.tenant_id),
+                 ip_address=_client_ip(request))
+    if principal is None or not principal.session_id:
+        return _complete_login(db, user, request, str(payload.get("session", "token")),
+                               method="totp_enrollment", extra={"recovery_codes": codes})
+    # Enrolling proves possession of the new factor: upgrade this session.
+    sess = db.execute(select(SessionModel).where(SessionModel.sid == principal.session_id)).scalar_one_or_none()
+    if sess is not None:
+        sess.mfa_verified = True
+    db.commit()
+    return JSONResponse({"enabled": True, "recovery_codes": codes})
+
+
+def _verify_second_factor(user: User, payload: dict) -> bool:
+    if payload.get("code"):
+        secret = mfa.decrypt_secret(user.mfa_secret_enc)
+        step = mfa.verify_totp(secret, str(payload["code"]), user.mfa_last_step) if secret else None
+        if step is not None:
+            user.mfa_last_step = step
+            return True
+        return False
+    if payload.get("recovery_code"):
+        remaining = mfa.consume_recovery_code(str(payload["recovery_code"]),
+                                              list(user.mfa_recovery_hashes or []))
+        if remaining is not None:
+            user.mfa_recovery_hashes = remaining
+            return True
+    return False
+
+
+@router.post("/mfa/disable")
+def mfa_disable(request: Request, payload: dict = Body(...),
+                principal: Principal = Depends(get_current_principal),
+                db: Session = Depends(get_db)) -> dict:
+    user = db.get(User, principal.user_id)
+    if not user.mfa_enabled:
+        raise HTTPException(409, detail={"error": "mfa_not_enabled", "message": "MFA is not enabled."})
+    if mfa.tenant_requires_mfa(db.get(Tenant, user.tenant_id)):
+        raise HTTPException(409, detail={"error": "tenant_requires_mfa",
+                                         "message": "Your organization requires MFA; it cannot be turned off."})
+    if not verify_password(str(payload.get("password", "")), user.password_hash) \
+            or not _verify_second_factor(user, payload):
+        _register_failure(db, user, request, stage="mfa_disable")
+        db.commit()
+        raise HTTPException(400, detail={"error": "verification_failed",
+                                         "message": "Password or code is incorrect."})
+    user.mfa_enabled, user.mfa_secret_enc, user.mfa_pending_secret_enc = False, None, None
+    user.mfa_recovery_hashes, user.mfa_last_step, user.mfa_enrolled_at = [], None, None
+    audit.record(db, action="auth.mfa_disabled", actor_id=user.id, actor_label=user.email,
+                 tenant_id=user.tenant_id, data_scope=current_scope(db, user.tenant_id),
+                 ip_address=_client_ip(request))
+    db.commit()
+    return {"enabled": False}
+
+
+@router.post("/mfa/recovery-codes")
+def mfa_regenerate_recovery(request: Request, payload: dict = Body(...),
+                            principal: Principal = Depends(get_current_principal),
+                            db: Session = Depends(get_db)) -> dict:
+    """Replace all recovery codes (requires a current TOTP code)."""
+    user = db.get(User, principal.user_id)
+    if not user.mfa_enabled or not payload.get("code") or not _verify_second_factor(user, {"code": payload["code"]}):
+        _register_failure(db, user, request, stage="mfa_recovery")
+        db.commit()
+        raise HTTPException(400, detail={"error": "verification_failed", "message": "Code is incorrect."})
+    codes = mfa.generate_recovery_codes()
+    user.mfa_recovery_hashes = [mfa.hash_recovery_code(c) for c in codes]
+    audit.record(db, action="auth.mfa_recovery_codes_regenerated", actor_id=user.id,
+                 actor_label=user.email, tenant_id=user.tenant_id,
+                 data_scope=current_scope(db, user.tenant_id), ip_address=_client_ip(request))
+    db.commit()
+    return {"recovery_codes": codes}
+
+
+@router.post("/refresh")
+def refresh(request: Request, body: RefreshRequest | None = None,
+            db: Session = Depends(get_db)) -> JSONResponse:
+    """Rotate the refresh token (from the body, or the session cookie for
+    browsers). Presenting an already-rotated token is treated as token theft:
+    the whole session is revoked."""
+    delivery = "token"
+    token = body.refresh_token if body and body.refresh_token else None
+    if token is None:
+        token = request.cookies.get(REFRESH_COOKIE)
+        delivery = "cookie"
+        if token and not csrf_ok(request):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, detail={
+                "error": "csrf_failed", "message": "Missing or invalid CSRF token."})
+    if not token:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="No refresh token")
+    token_hash = hash_token(token)
     now = datetime.now(UTC)
     sess = db.execute(select(SessionModel).where(
         SessionModel.refresh_token_hash == token_hash)).scalar_one_or_none()
@@ -135,8 +370,7 @@ def refresh(body: RefreshRequest, request: Request, db: Session = Depends(get_db
     if sess.revoked_at is not None or sess.expires_at < now:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired refresh token")
     user = db.get(User, sess.user_id)
-    tenant = db.get(Tenant, user.tenant_id) if user else None
-    if user is None or not user.is_active or tenant is None or not tenant.is_active:
+    if not _usable(db, user):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="User or tenant inactive")
 
     new_refresh, _ = create_refresh_token({"sub": str(user.id), "sid": sess.sid})
@@ -145,15 +379,14 @@ def refresh(body: RefreshRequest, request: Request, db: Session = Depends(get_db
     sess.last_used_at = now
     access = create_access_token({"sub": str(user.id), "tid": str(user.tenant_id), "sid": sess.sid})
     db.commit()
-    return TokenResponse(access_token=access, refresh_token=new_refresh,
-                         expires_in=settings.access_token_ttl_seconds)
+    return _session_response(access, new_refresh, delivery)
 
 
 @router.post("/logout")
 def logout(
     principal: Principal = Depends(get_current_principal),
     db: Session = Depends(get_db),
-) -> dict:
+) -> JSONResponse:
     """Revoke the caller's session server-side. Every access and refresh token
     issued for it stops working immediately."""
     if principal.session_id:
@@ -165,13 +398,16 @@ def logout(
     audit.record(db, action="auth.logout", actor_id=principal.user_id,
                  tenant_id=principal.tenant_id, actor_label=principal.email)
     db.commit()
-    return {"status": "logged_out"}
+    response = JSONResponse({"status": "logged_out"})
+    clear_session_cookies(response)
+    return response
 
 
 @router.get("/me", response_model=MeResponse)
 def me(principal: Principal = Depends(get_current_principal),
        db: Session = Depends(get_db)) -> MeResponse:
     tenant = db.get(Tenant, principal.tenant_id)
+    user = db.get(User, principal.user_id)
     home_id = principal.home_tenant_id or principal.tenant_id
     return MeResponse(
         id=str(principal.user_id),
@@ -188,6 +424,9 @@ def me(principal: Principal = Depends(get_current_principal),
         home_tenant_slug=principal.home_tenant_slug or (tenant.slug if tenant else ""),
         home_permissions=principal.home_permissions or principal.permissions,
         delegated_via=principal.delegated_via,
+        mfa_enabled=bool(user.mfa_enabled) if user else False,
+        mfa_verified=principal.mfa_verified,
+        tenant_requires_mfa=mfa.tenant_requires_mfa(tenant),
     )
 
 

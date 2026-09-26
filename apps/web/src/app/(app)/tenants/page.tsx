@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Building2, ShieldCheck, ShieldOff } from "lucide-react";
+import { Building2, Lock, ShieldCheck, ShieldOff } from "lucide-react";
 import { api } from "@/lib/api";
 import { useApi, useApp } from "@/lib/store";
 import { ErrorState, Loading, PageHeader, Panel } from "@/components/ui";
@@ -112,6 +112,17 @@ export default function OrganizationPage() {
           </Panel>
         )}
 
+        <Panel title={<span className="flex items-center gap-2"><Lock className="w-4 h-4 text-cyan" /> Sign-in security</span>}
+          className={isCustomer ? "xl:col-span-2" : ""}>
+          <MfaPolicy data={data} delegated={delegated} mfaVerified={!!me?.mfa_verified}
+            onSave={async (require_mfa) => {
+              const ok = await action.run(() => api.patch("/tenants/current", { security: { require_mfa } }),
+                require_mfa ? "Two-step verification is now required for everyone acting in this organization."
+                  : "Two-step verification is no longer required.");
+              if (ok) reload();
+            }} />
+        </Panel>
+
         <Panel title="Escalation contacts & branding" className={isCustomer ? "xl:col-span-2" : ""}>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <Field label="Escalation contacts" hint="One per line: role | email | phone (optional). Used for SLA escalations.">
@@ -131,4 +142,37 @@ export default function OrganizationPage() {
 
 function Row({ k, v }: { k: string; v: string }) {
   return <div className="flex gap-2"><dt className="text-ink-500 w-36 shrink-0">{k}</dt><dd className="text-ink-200">{v}</dd></div>;
+}
+
+function MfaPolicy({ data, delegated, mfaVerified, onSave }: {
+  data: any; delegated: boolean; mfaVerified: boolean; onSave: (v: boolean) => void;
+}) {
+  const required = !!data.security?.require_mfa;
+  const setBy = data.security?.require_mfa_set_by;
+  if (delegated) {
+    return <p className="text-sm text-ink-400">Two-step verification is {required ? "required" : "optional"} here. Only {data.name}&apos;s own administrators can change this.</p>;
+  }
+  return (
+    <div className="space-y-2">
+      <label className="flex items-start gap-2 text-sm">
+        <input type="checkbox" className="mt-1" checked={required} disabled={!required && !mfaVerified}
+          onChange={(e) => {
+            if (e.target.checked && !confirm("Require two-step verification for everyone? Users without it must set it up at their next sign-in, and existing sessions without it will end.")) return;
+            onSave(e.target.checked);
+          }} />
+        <span>
+          Require two-step verification for everyone acting in this organization
+          <span className="block text-xs text-ink-500">
+            {data.kind === "customer"
+              ? <>Applies to your users <b>and to provider staff</b> entering this tenant, including their API keys. API keys you issue here are not affected.</>
+              : <>Applies to every interactive sign-in of your staff. API keys issued in this tenant are not affected.</>}
+            {setBy === "provider" && " Currently enforced by your service provider."}
+          </span>
+        </span>
+      </label>
+      {!required && !mfaVerified && (
+        <p className="text-xs text-amber">Set up two-step verification on your own account (My Account) and sign in with it first, so you cannot lock yourself out.</p>
+      )}
+    </div>
+  );
 }

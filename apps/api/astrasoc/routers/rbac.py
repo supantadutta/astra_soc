@@ -252,6 +252,36 @@ def revoke_role(user_id: uuid.UUID, role_name: str,
     return {"status": "revoked"}
 
 
+@router.post("/users/{user_id}/mfa/reset")
+def reset_user_mfa(user_id: uuid.UUID,
+                   principal: Principal = Depends(require_permission("user:manage")),
+                   db: Session = Depends(get_db)) -> dict:
+    """Clear a user's second factor (lost device). Their sessions are revoked;
+    if the tenant requires MFA they must enroll again at next sign-in. You
+    cannot reset someone who holds permissions you lack, or yourself."""
+    user = _user_in_tenant(db, principal, user_id)
+    if user.id == principal.user_id:
+        raise HTTPException(400, detail="Use My Account to manage your own MFA.")
+    perms, _ = _user_permissions(db, user)
+    _check_grantable(db, principal, perms)
+    user.mfa_enabled, user.mfa_secret_enc, user.mfa_pending_secret_enc = False, None, None
+    user.mfa_recovery_hashes, user.mfa_last_step, user.mfa_enrolled_at = [], None, None
+    for sess in db.execute(select(SessionModel).where(
+            SessionModel.user_id == user.id, SessionModel.revoked_at.is_(None))).scalars():
+        sess.revoked_at, sess.revoked_reason = datetime.now(UTC), "mfa_reset"
+    audit.record(db, action="rbac.user_mfa_reset", actor_id=principal.user_id,
+                 actor_label=principal.label, tenant_id=principal.tenant_id,
+                 resource_type="user", resource_id=str(user_id), detail={"email": user.email})
+    db.commit()
+    return {"status": "mfa_reset"}
+
+
+def _user_permissions(db: Session, user: User) -> tuple[list[str], list[str]]:
+    from ..auth.deps import _effective_permissions
+
+    return _effective_permissions(db, user)
+
+
 # --- The caller's tenant ------------------------------------------------------
 tenants_router = APIRouter(prefix="/api/v1/tenants", tags=["tenants"])
 
@@ -277,7 +307,11 @@ def current_tenant(principal: Principal = Depends(get_current_principal),
     data["features"] = sorted(tenant_features(t)) if t.kind == "customer" else ["*"]
     data["delegation"] = delegation_policy(t)
     data["acting_as"] = {"delegated_via": principal.delegated_via,
-                         "home_tenant": principal.home_tenant_slug, "roles": principal.roles}
+                         "home_tenant": principal.home_tenant_slug, "roles": principal.roles,
+                         "mfa_verified": principal.mfa_verified}
+    sec = (t.settings or {}).get("security") or {}
+    data["security"] = {"require_mfa": bool(sec.get("require_mfa")),
+                        "require_mfa_set_by": sec.get("require_mfa_set_by")}
     return data
 
 
@@ -319,8 +353,41 @@ def update_current_tenant(payload: dict = Body(...),
             "default_provider_role": default_role,
             "allowed_roles": allowed,
         }}
+    if "security" in payload:
+        _apply_security_policy(t, payload["security"], principal, set_by="customer")
     audit.record(db, action="tenant.self_service_update", actor_id=principal.user_id,
                  actor_label=principal.label, tenant_id=t.id, resource_type="tenant",
-                 resource_id=str(t.id), detail={"fields": list(payload)})
+                 resource_id=str(t.id), detail={"fields": list(payload),
+                                                 "security": payload.get("security")})
     db.commit()
     return serialize(t)
+
+
+def _apply_security_policy(t: Tenant, pol, principal: Principal, *, set_by: str) -> None:
+    """Tenant security policy (currently: require MFA for everyone acting in
+    the tenant, including delegated provider staff).
+
+    * Only the tenant's own users change it from the customer side.
+    * Turning it on requires the caller's own session to be MFA-verified, so
+      an administrator cannot lock everyone out, themselves included.
+    * The provider may impose it, but may only lift a requirement it imposed
+      itself; a customer's own requirement stays in force.
+    """
+    if not isinstance(pol, dict) or not isinstance(pol.get("require_mfa"), bool):
+        raise HTTPException(422, detail="security must be an object like {\"require_mfa\": true}")
+    if set_by == "customer" and principal.is_delegated:
+        raise HTTPException(403, detail={"error": "customer_only",
+                                         "message": "Only the customer's own administrators can change this."})
+    current = dict((t.settings or {}).get("security") or {})
+    want = pol["require_mfa"]
+    if want and not principal.mfa_verified:
+        raise HTTPException(409, detail={"error": "mfa_not_verified",
+                                         "message": "Enable MFA on your own account (My Account) and sign "
+                                                    "in with it before requiring it for the organization."})
+    if not want and current.get("require_mfa") and set_by == "provider" \
+            and current.get("require_mfa_set_by") == "customer":
+        raise HTTPException(403, detail={"error": "customer_policy",
+                                         "message": "The customer requires MFA; only the customer can lift it."})
+    current["require_mfa"] = want
+    current["require_mfa_set_by"] = set_by if want else None
+    t.settings = {**(t.settings or {}), "security": current}

@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Lock, Plus } from "lucide-react";
-import { api } from "@/lib/api";
+import { Lock, Plus, ShieldCheck, ShieldOff } from "lucide-react";
+import { api, errorMessage } from "@/lib/api";
+import { useApp } from "@/lib/store";
 import { Modal, PageHeader, Panel } from "@/components/ui";
 import { titleCase } from "@/lib/ui";
 
@@ -14,6 +15,16 @@ export default function RBACPage() {
   const [assignUser, setAssignUser] = useState<any>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const { me } = useApp();
+
+  async function resetMfa(u: any) {
+    if (!confirm(`Reset two-step verification for ${u.email}? Their sessions end now and they must set it up again${me?.tenant_requires_mfa ? " at their next sign-in" : " if they want it"}.`)) return;
+    try {
+      await api.post(`/rbac/users/${u.id}/mfa/reset`);
+      setToast(`Two-step verification reset for ${u.email}.`);
+      load();
+    } catch (e) { setToast(errorMessage(e)); }
+  }
 
   async function load() {
     try {
@@ -53,10 +64,20 @@ export default function RBACPage() {
               <div key={u.id} className="rounded-lg border border-white/5 px-3 py-2">
                 <div className="flex items-center justify-between">
                   <div>
-                    <div className="text-sm text-ink-100">{u.full_name}</div>
+                    <div className="text-sm text-ink-100 flex items-center gap-1.5">
+                      {u.full_name}
+                      {u.mfa_enabled
+                        ? <span title="Two-step verification on"><ShieldCheck className="w-3.5 h-3.5 text-teal" /></span>
+                        : <span title="Two-step verification off"><ShieldOff className="w-3.5 h-3.5 text-ink-500" /></span>}
+                    </div>
                     <div className="text-xs text-ink-500">{u.email}</div>
                   </div>
-                  <button className="btn-ghost !py-1 !text-xs" onClick={() => setAssignUser(u)}><Plus className="w-3 h-3" /> Assign role</button>
+                  <div className="flex gap-1">
+                    {u.mfa_enabled && u.id !== me?.id && (
+                      <button className="btn-ghost !py-1 !text-xs" onClick={() => resetMfa(u)} title="Lost device: clear their second factor">Reset MFA</button>
+                    )}
+                    <button className="btn-ghost !py-1 !text-xs" onClick={() => setAssignUser(u)}><Plus className="w-3 h-3" /> Assign role</button>
+                  </div>
                 </div>
                 <div className="flex flex-wrap gap-1 mt-1.5">
                   {u.roles?.map((r: any) => (

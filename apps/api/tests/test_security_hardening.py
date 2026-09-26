@@ -263,3 +263,7 @@ def test_rate_limit_is_per_credential_not_shared_proxy_ip():
     alice, bob = {"Authorization": "Bearer alice"}, {"Authorization": "Bearer bob"}
     assert [c.get("/api/v1/ping", headers=alice).status_code for _ in range(4)] == [200, 200, 200, 429]
     assert c.get("/api/v1/ping", headers=bob).status_code == 200
+    # Browser sessions (cookie, no Authorization header) get their own budgets too.
+    carol, dave = TestClient(app, cookies={"astrasoc_at": "carol"}), TestClient(app, cookies={"astrasoc_at": "dave"})
+    assert [carol.get("/api/v1/ping").status_code for _ in range(4)] == [200, 200, 200, 429]
+    assert dave.get("/api/v1/ping").status_code == 200

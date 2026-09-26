@@ -296,6 +296,9 @@ def get_tenant(tenant_id: uuid.UUID, principal: Principal = Depends(get_current_
     data["features"] = sorted(tenant_features(t))
     data["delegation"] = delegation_policy(t)
     data["mode"] = get_mode(db, t.id).to_dict()
+    sec = (t.settings or {}).get("security") or {}
+    data["security"] = {"require_mfa": bool(sec.get("require_mfa")),
+                        "require_mfa_set_by": sec.get("require_mfa_set_by")}
     return data
 
 
@@ -399,6 +402,10 @@ def update_tenant(tenant_id: uuid.UUID, payload: dict = Body(...),
     if "customer_approval_actions" in payload:
         new_settings["customer_approval_actions"] = list(payload["customer_approval_actions"] or [])
     t.settings = new_settings
+    if "require_mfa" in payload:
+        from .rbac import _apply_security_policy
+
+        _apply_security_policy(t, {"require_mfa": payload["require_mfa"]}, principal, set_by="provider")
     audit.record(db, action="mssp.tenant_updated", actor_id=principal.user_id,
                  actor_label=principal.label, tenant_id=principal.home_tenant_id,
                  resource_type="tenant", resource_id=str(t.id), detail={"fields": list(payload)})

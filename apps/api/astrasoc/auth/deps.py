@@ -14,8 +14,10 @@ from ..db import get_db
 from ..models import APIKey, Role, Tenant, User, UserRole
 from ..models import Session as SessionModel
 from .context import Principal
+from .mfa import tenant_requires_mfa
 from .permissions import role_has_permission
 from .security import decode_token, hash_token
+from .sessions import ACCESS_COOKIE, SAFE_METHODS, csrf_ok
 
 
 def _effective_permissions(db: Session, user: User) -> tuple[list[str], list[str]]:
@@ -69,6 +71,11 @@ def _principal_from_user(db: Session, user: User, session_id: str | None = None)
     )
 
 
+# Endpoints a session lacking a required second factor may still call, so the
+# user can finish enrolling or sign out.
+_MFA_EXEMPT_PREFIXES = ("/api/v1/auth/logout", "/api/v1/auth/mfa")
+
+
 def get_current_principal(
     request: Request,
     db: Session = Depends(get_db),
@@ -76,9 +83,29 @@ def get_current_principal(
     x_api_key: str | None = Header(default=None),
     x_tenant_id: str | None = Header(default=None),
 ) -> Principal:
-    """Resolve the caller from a Bearer JWT or an API key, then apply MSSP
-    tenant-context switching when ``X-Tenant-ID`` names another tenant."""
+    """Resolve the caller from a Bearer JWT, an API key or the browser session
+    cookie, enforce CSRF for cookie sessions and the tenant's MFA policy, then
+    apply MSSP tenant-context switching when ``X-Tenant-ID`` names another
+    tenant."""
+    cookie_token = None
+    if not authorization and not x_api_key:
+        cookie_token = request.cookies.get(ACCESS_COOKIE)
+        if cookie_token:
+            if request.method not in SAFE_METHODS and not csrf_ok(request):
+                raise HTTPException(status.HTTP_403_FORBIDDEN, detail={
+                    "error": "csrf_failed",
+                    "message": "Missing or invalid CSRF token for a cookie-authenticated request."})
+            authorization = f"Bearer {cookie_token}"
     principal, user, key = _authenticate(db, authorization, x_api_key)
+    principal.via_cookie = cookie_token is not None
+    if key is None and principal.session_id and not principal.mfa_verified \
+            and not request.url.path.startswith(_MFA_EXEMPT_PREFIXES):
+        home = db.get(Tenant, principal.tenant_id)
+        if tenant_requires_mfa(home) and not user.is_service_account:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, detail={
+                "error": "mfa_required",
+                "message": "Your organization requires multi-factor authentication. "
+                           "Sign in again to set it up."})
     principal.home_tenant_id = principal.tenant_id
     principal.home_tenant_slug = principal.tenant_slug
     principal.home_permissions = list(principal.permissions)
@@ -114,6 +141,13 @@ def _enter_tenant(db: Session, principal: Principal, user: User, ref: str) -> No
     except TenantAccessDenied as exc:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail={
             "error": "tenant_access_denied", "message": exc.message})
+    # A customer that requires MFA requires it of everyone acting inside it,
+    # including provider staff and their API keys.
+    if tenant_requires_mfa(target) and not principal.mfa_verified:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail={
+            "error": "mfa_required_by_tenant",
+            "message": f"{target.name} requires multi-factor authentication. "
+                       "Sign in with MFA to act in this tenant."})
     principal.tenant_id = target.id
     principal.tenant_slug = target.slug
     principal.permissions = decision.permissions
@@ -138,7 +172,9 @@ def _authenticate(db: Session, authorization: str | None,
                 raise _unauthorized("API key owner is missing or disabled")
             key.last_used_at = datetime.now(UTC)
             db.flush()
-            return _principal_from_user(db, user), user, key
+            principal = _principal_from_user(db, user)
+            principal.via_api_key = True
+            return principal, user, key
         raise _unauthorized("Invalid API key")
 
     # 2) Bearer JWT (interactive users).
@@ -171,7 +207,27 @@ def _authenticate(db: Session, authorization: str | None,
     user = db.get(User, user_id)
     if user is None or not user.is_active:
         raise _unauthorized("User not found or inactive")
-    return _principal_from_user(db, user, session_id=sid), user, None
+    principal = _principal_from_user(db, user, session_id=sid)
+    principal.mfa_verified = bool(sess.mfa_verified)
+    return principal, user, None
+
+
+def get_optional_principal(
+    request: Request,
+    db: Session = Depends(get_db),
+    authorization: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> Principal | None:
+    """Like :func:`get_current_principal` but returns None when the caller is
+    not authenticated (used by MFA enrollment, which also accepts an
+    enrollment token)."""
+    try:
+        return get_current_principal(request, db, authorization, x_api_key, x_tenant_id)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_401_UNAUTHORIZED:
+            return None
+        raise
 
 
 def require_permission(permission: str):
