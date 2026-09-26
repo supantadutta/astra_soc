@@ -28,7 +28,7 @@ from ...schemas.ai_output import (
     EvidenceFirstClaim,
     validate_ai_output,
 )
-from . import providers, simulated
+from . import guardrails, providers, simulated
 
 _CIRCUIT_THRESHOLD = 3
 _CIRCUIT_COOLDOWN = timedelta(minutes=5)
@@ -58,6 +58,10 @@ class InvocationResult:
             "fallback_used": self.fallback_used,
             "notes": self.notes,
         }
+
+
+class AIDisabledError(RuntimeError):
+    """AI assistance is switched off for the tenant (deterministic mode)."""
 
 
 class ModelGateway:
@@ -126,17 +130,20 @@ class ModelGateway:
 
     def _call(
         self, db: Session, dep: ModelDeployment, prov: ModelProvider, capability: str, task: dict,
+        timeout: int | None = None,
     ) -> tuple[dict, int, bool]:
-        """Returns (raw_output, tokens, simulated). Raises on hard failure."""
+        """Returns (raw_output, tokens, simulated). Raises on hard failure.
+        Real providers only ever receive the wrapped/DLP'd task."""
         if prov.kind == ProviderKind.SIMULATED.value:
             return self._run_simulated(capability, task), 350, True
 
         # Real provider path.
+        safe_task, _ = guardrails.prepare_untrusted(task)
         system = _system_prompt(capability)
-        user = _user_prompt(task)
+        user = _user_prompt(safe_task)
         text, usage = providers.chat_completion(
             prov.kind, prov.base_url, prov.secret_ref, dep.model_identifier,
-            system, user, timeout=prov.timeout_seconds,
+            system, user, timeout=min(prov.timeout_seconds, timeout or prov.timeout_seconds),
         )
         tokens = int(usage.get("total_tokens") or usage.get("input_tokens", 0)
                      + usage.get("output_tokens", 0) or 500)
@@ -153,17 +160,30 @@ class ModelGateway:
         task: dict[str, Any],
         *,
         force_verification: bool = False,
+        classification: str = "internal",
+        timeout: int | None = None,
     ) -> InvocationResult:
         start = datetime.now(UTC)
         notes: list[str] = []
+        policy = guardrails.tenant_ai_policy(db, tenant_id)
+        if not policy.ai_enabled:
+            raise AIDisabledError("AI assistance is disabled for this tenant.")
         route = self._route(db, tenant_id, capability)
 
         candidates: list[tuple[ModelDeployment, ModelProvider]] = []
         if route:
             for dep_id in (route.primary_deployment_id, route.fallback_deployment_id):
                 pair = self._deployment(db, dep_id)
-                if pair and not self._circuit_open(pair[1]):
-                    candidates.append(pair)
+                if not pair or pair[1].tenant_id != tenant_id:
+                    continue
+                if self._circuit_open(pair[1]):
+                    notes.append(f"{pair[1].kind}:{pair[0].model_identifier} skipped: circuit open")
+                    continue
+                ok, why = guardrails.provider_allowed(pair[1], policy, classification)
+                if not ok:
+                    notes.append(f"{pair[1].kind}:{pair[0].model_identifier} skipped: {why}")
+                    continue
+                candidates.append(pair)
         # Always have the simulated reasoner as the final safety net.
         sim = self._simulated_deployment(db, tenant_id)
         if sim:
@@ -176,11 +196,13 @@ class ModelGateway:
         fallback_used = False
         for idx, (dep, prov) in enumerate(candidates):
             try:
-                raw, tokens, is_sim = self._call(db, dep, prov, capability, task)
+                raw, tokens, is_sim = self._call(db, dep, prov, capability, task, timeout)
                 claim = validate_ai_output(raw)  # reject malformed output
                 used_dep, used_prov = dep, prov
                 cost = tokens / 1000 * (dep.cost_input_per_1k + dep.cost_output_per_1k)
                 self._record_usage(prov, tokens, cost, ok=True)
+                if not is_sim:
+                    guardrails.charge_tokens(prov, tokens)
                 if idx > 0:
                     fallback_used = True
                     notes.append(f"Primary unavailable/invalid; used {prov.kind}:{dep.model_identifier}.")
@@ -191,6 +213,20 @@ class ModelGateway:
                 continue
         else:  # pragma: no cover — sim path always succeeds
             raise RuntimeError("No model available, including simulated fallback.")
+
+        # Evidence-first: the model may only cite evidence it was actually given.
+        known = guardrails.valid_evidence_ids(task)
+        cited = [e for e in claim.evidence_ids if e in known]
+        if len(cited) != len(claim.evidence_ids):
+            notes.append(f"Dropped {len(claim.evidence_ids) - len(cited)} cited evidence id(s) "
+                         "that do not exist in the case.")
+            claim = claim.model_copy(update={"evidence_ids": cited})
+        if not is_sim:
+            report = guardrails.prepare_untrusted(task)[1]
+            claim = claim.model_copy(update={"derived_from_untrusted_content": True})
+            if report["injection_detected"]:
+                notes.append("Prompt-injection patterns detected in case content; they were "
+                             "wrapped as untrusted data: " + ", ".join(report["injection_patterns"][:3]))
 
         # High-risk verification: a DIFFERENT provider or a deterministic check.
         verification = None
@@ -210,6 +246,9 @@ class ModelGateway:
         """Independent verification. Prefer a different provider; otherwise use a
         deterministic validator so verification never silently no-ops."""
         verifier_pair = self._deployment(db, route.verifier_deployment_id) if route else None
+        if verifier_pair and (verifier_pair[1].tenant_id != tenant_id or not guardrails.provider_allowed(
+                verifier_pair[1], guardrails.tenant_ai_policy(db, tenant_id))[0]):
+            verifier_pair = None
         if verifier_pair and verifier_pair[1].id != primary_prov.id and not self._circuit_open(verifier_pair[1]):
             dep, prov = verifier_pair
             try:

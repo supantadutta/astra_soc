@@ -152,6 +152,9 @@ class ModelProvider(UUIDMixin, TenantMixin, TimestampMixin, Base):
     total_tokens: Mapped[int] = mapped_column(Integer, default=0)
     total_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
     total_requests: Mapped[int] = mapped_column(Integer, default=0)
+    # Daily budget accounting (reset when the UTC day changes).
+    tokens_today: Mapped[int] = mapped_column(Integer, default=0)
+    tokens_day: Mapped[str] = mapped_column(String(10), default="")
 
     deployments: Mapped[list[ModelDeployment]] = relationship(back_populates="provider")
 

@@ -23,7 +23,9 @@ from ...models import Agent, AgentRun, Evidence, Hypothesis, Incident
 from ...models.enums import AgentRunStatus, EvidenceKind
 from ...schemas.common import serialize, serialize_many
 from ..events import Event, bus
+from ..metering import record as meter
 from ..model_gateway import gateway
+from ..model_gateway.gateway import AIDisabledError
 from ..tool_broker import broker
 from ..tool_broker.broker import ToolBrokerError
 
@@ -34,7 +36,7 @@ class AgentOrchestrator:
         respecting its tool allowlist and the case's data scope."""
         snapshot: dict = {"steps": []}
         inc = db.get(Incident, incident_id)
-        if inc is None or inc.tenant_id != tenant_id:
+        if inc is None or inc.tenant_id != tenant_id or inc.data_scope != scope:
             return snapshot
         snapshot["incident"] = serialize(inc)
 
@@ -61,12 +63,14 @@ class AgentOrchestrator:
                     snapshot["steps"].append({"tool": tool_key, "ok": False, "error": exc.code})
         if "evidence" not in snapshot:
             ev = db.execute(
-                select(Evidence).where(Evidence.incident_id == incident_id)
+                select(Evidence).where(Evidence.tenant_id == tenant_id,
+                                       Evidence.incident_id == incident_id)
             ).scalars().all()
             snapshot["evidence"] = serialize_many(ev)
         # Existing hypotheses for context.
         hyps = db.execute(
-            select(Hypothesis).where(Hypothesis.incident_id == incident_id)
+            select(Hypothesis).where(Hypothesis.tenant_id == tenant_id,
+                                     Hypothesis.incident_id == incident_id)
         ).scalars().all()
         snapshot["hypotheses"] = serialize_many(hyps)
         return snapshot
@@ -116,10 +120,20 @@ class AgentOrchestrator:
                 db.flush()
                 return run
 
+            t0 = datetime.now(UTC)
             result = gateway.invoke(
                 db, tenant_id, agent.required_capability, snapshot,
                 force_verification=(agent_key in ("response_planner", "independent_verifier")),
+                classification=agent.required_data_classification or "internal",
+                timeout=agent.max_execution_seconds,
             )
+            elapsed = (datetime.now(UTC) - t0).total_seconds()
+            if elapsed > agent.max_execution_seconds:
+                run.status = AgentRunStatus.TIMED_OUT.value
+                run.error = f"Execution time budget exceeded ({elapsed:.0f}s > {agent.max_execution_seconds}s)."
+                run.finished_at = datetime.now(UTC)
+                db.flush()
+                return run
             if result.tokens_used > agent.max_token_budget:
                 run.status = AgentRunStatus.BUDGET_EXCEEDED.value
                 run.error = f"Token budget exceeded ({result.tokens_used} > {agent.max_token_budget})."
@@ -128,6 +142,9 @@ class AgentOrchestrator:
                 db.flush()
                 return run
 
+            meter(db, tenant_id, "agent_runs")
+            if not result.simulated:
+                meter(db, tenant_id, "llm_tokens", result.tokens_used)
             run.output = result.to_dict()
             run.steps = snapshot.get("steps", []) + [{"stage": "reason", "provider": result.provider_kind}]
             run.tokens_used = result.tokens_used
@@ -162,6 +179,11 @@ class AgentOrchestrator:
                 type="agent.finished", scope=scope, tenant_id=str(tenant_id),
                 data={"agent": agent_key, "run_id": str(run.id), "status": run.status,
                       "confidence": result.claim.confidence, "simulated": result.simulated}))
+        except AIDisabledError as exc:
+            run.status = AgentRunStatus.CANCELLED.value
+            run.error = str(exc)
+            run.finished_at = datetime.now(UTC)
+            db.flush()
         except Exception as exc:  # noqa: BLE001
             run.status = AgentRunStatus.FAILED.value
             run.error = str(exc)[:500]

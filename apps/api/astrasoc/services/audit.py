@@ -1,29 +1,58 @@
-"""Append-only, tamper-evident audit logging.
+"""Append-only, tamper-evident audit logging (keyed hash chain).
 
-Each entry stores a hash chained to the previous entry's hash, so any deletion
-or in-place edit breaks the chain and is detectable via
-:func:`verify_audit_chain`. Sensitive values are never written in the clear —
-callers pass already-redacted detail.
+Each entry stores ``entry_hash = HMAC-SHA256(audit_key, canonical(entry))``
+where the canonical form covers every recorded field (sequence number,
+tenant, actor, action, resource, outcome, scope, network context, detail,
+timestamp) plus the previous entry's hash. Because the chain is keyed with
+``ASTRASOC_AUDIT_KEY`` (kept outside the database), someone with database
+write access cannot edit, delete or insert entries and recompute a valid
+chain. Appends are serialised (process lock + a PostgreSQL advisory
+transaction lock) so concurrent writers cannot fork the chain.
+
+:func:`verify_audit_chain` walks the WHOLE chain in sequence order in
+batches and reports the first break.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import threading
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select, text
 from sqlalchemy.orm import Session
 
-from ..auth.security import content_hash
+from ..config import settings
 from ..models import AuditEvent
 from .events import Event, bus
 
+_APPEND_LOCK = threading.Lock()
+_PG_LOCK_KEY = 0x41535452  # "ASTR"
 
-def _last_hash(db: Session, tenant_id: uuid.UUID | None) -> str | None:
-    row = db.execute(
-        select(AuditEvent).order_by(desc(AuditEvent.created_at), desc(AuditEvent.id)).limit(1)
-    ).scalar_one_or_none()
-    return row.entry_hash if row else None
+
+def _canonical(e: AuditEvent) -> str:
+    return json.dumps({
+        "v": 2, "seq": e.seq, "tenant_id": str(e.tenant_id) if e.tenant_id else None,
+        "actor_id": str(e.actor_id) if e.actor_id else None, "actor_type": e.actor_type,
+        "actor_label": e.actor_label, "action": e.action, "resource_type": e.resource_type,
+        "resource_id": e.resource_id, "outcome": e.outcome, "data_scope": e.data_scope,
+        "ip_address": e.ip_address, "request_id": e.request_id, "detail": e.detail or {},
+        "created_at": e.created_at.astimezone(UTC).isoformat() if e.created_at else None,
+        "prev": e.prev_hash,
+    }, sort_keys=True, default=str, separators=(",", ":"))
+
+
+def _sign(e: AuditEvent) -> str:
+    return hmac.new(settings.audit_signing_key.encode(), _canonical(e).encode(),
+                    hashlib.sha256).hexdigest()
+
+
+def _normalise_detail(detail: dict[str, Any] | None) -> dict:
+    # Round-trip through JSON so the stored value hashes identically on read.
+    return json.loads(json.dumps(detail or {}, default=str))
 
 
 def record(
@@ -42,37 +71,23 @@ def record(
     ip_address: str | None = None,
     detail: dict[str, Any] | None = None,
 ) -> AuditEvent:
-    prev = _last_hash(db, tenant_id)
-    payload = {
-        "action": action,
-        "actor_id": str(actor_id) if actor_id else None,
-        "actor_type": actor_type,
-        "resource_type": resource_type,
-        "resource_id": resource_id,
-        "outcome": outcome,
-        "data_scope": data_scope,
-        "detail": detail or {},
-        "prev": prev,
-    }
-    entry_hash = content_hash(json.dumps(payload, sort_keys=True, default=str))
-    event = AuditEvent(
-        action=action,
-        actor_id=actor_id,
-        actor_type=actor_type,
-        actor_label=actor_label,
-        tenant_id=tenant_id,
-        resource_type=resource_type,
-        resource_id=resource_id,
-        outcome=outcome,
-        data_scope=data_scope,
-        request_id=request_id,
-        ip_address=ip_address,
-        detail=detail or {},
-        prev_hash=prev,
-        entry_hash=entry_hash,
-    )
-    db.add(event)
-    db.flush()
+    with _APPEND_LOCK:
+        if db.bind is not None and db.bind.dialect.name == "postgresql":
+            db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _PG_LOCK_KEY})
+        last = db.execute(select(AuditEvent).where(AuditEvent.seq.is_not(None))
+                          .order_by(desc(AuditEvent.seq)).limit(1)).scalar_one_or_none()
+        event = AuditEvent(
+            seq=(last.seq + 1) if last else 1, chain_version=2,
+            action=action, actor_id=actor_id, actor_type=actor_type,
+            actor_label=(actor_label or "")[:160], tenant_id=tenant_id,
+            resource_type=resource_type, resource_id=resource_id, outcome=outcome,
+            data_scope=data_scope, request_id=request_id, ip_address=ip_address,
+            detail=_normalise_detail(detail), prev_hash=last.entry_hash if last else None,
+            created_at=datetime.now(UTC),
+        )
+        event.entry_hash = _sign(event)
+        db.add(event)
+        db.flush()
     bus.publish_soon(Event(
         type="audit.recorded", scope=data_scope,
         tenant_id=str(tenant_id) if tenant_id else None,
@@ -81,28 +96,34 @@ def record(
     return event
 
 
-def verify_audit_chain(db: Session, limit: int = 1000) -> dict[str, Any]:
-    """Recompute the hash chain to detect tampering. Returns a report."""
-    rows = db.execute(
-        select(AuditEvent).order_by(AuditEvent.created_at, AuditEvent.id).limit(limit)
-    ).scalars().all()
-    prev = None
+def verify_audit_chain(db: Session, batch: int = 1000) -> dict[str, Any]:
+    """Recompute the full keyed chain in sequence order. Returns a report."""
+    prev: str | None = None
+    expected_seq = 1
+    checked = 0
     broken_at = None
-    for row in rows:
-        payload = {
-            "action": row.action,
-            "actor_id": str(row.actor_id) if row.actor_id else None,
-            "actor_type": row.actor_type,
-            "resource_type": row.resource_type,
-            "resource_id": row.resource_id,
-            "outcome": row.outcome,
-            "data_scope": row.data_scope,
-            "detail": row.detail or {},
-            "prev": prev,
-        }
-        expected = content_hash(json.dumps(payload, sort_keys=True, default=str))
-        if expected != row.entry_hash:
-            broken_at = str(row.id)
+    reason = None
+    last_seq = 0
+    while broken_at is None:
+        rows = db.execute(select(AuditEvent).where(AuditEvent.seq > last_seq)
+                          .order_by(AuditEvent.seq).limit(batch)).scalars().all()
+        if not rows:
             break
-        prev = row.entry_hash
-    return {"verified": broken_at is None, "checked": len(rows), "broken_at": broken_at}
+        for row in rows:
+            if row.seq != expected_seq:
+                broken_at, reason = str(row.id), f"sequence gap: expected {expected_seq}, found {row.seq}"
+                break
+            if row.prev_hash != prev:
+                broken_at, reason = str(row.id), "previous-hash link mismatch"
+                break
+            if not hmac.compare_digest(row.entry_hash or "", _sign(row)):
+                broken_at, reason = str(row.id), "entry content does not match its signature"
+                break
+            prev = row.entry_hash
+            expected_seq += 1
+            checked += 1
+            last_seq = row.seq
+    legacy = db.execute(select(func.count()).select_from(AuditEvent)
+                        .where(AuditEvent.seq.is_(None))).scalar() or 0
+    return {"verified": broken_at is None, "checked": checked, "broken_at": broken_at,
+            "reason": reason, "legacy_unchained": legacy, "algorithm": "HMAC-SHA256 chain v2"}

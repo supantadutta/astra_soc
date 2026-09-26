@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, Index, String, Text
+from sqlalchemy import Boolean, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..db import GUID, Base
@@ -51,6 +51,9 @@ class AuditEvent(UUIDMixin, TimestampMixin, Base):
     detail: Mapped[dict] = mapped_column(default=dict)
     prev_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     entry_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # Monotonic position in the global chain (defines verification order).
+    seq: Mapped[int | None] = mapped_column(Integer, nullable=True, unique=True, index=True)
+    chain_version: Mapped[int] = mapped_column(Integer, default=2)
 
 
 class Notification(UUIDMixin, TenantMixin, TimestampMixin, Base):
