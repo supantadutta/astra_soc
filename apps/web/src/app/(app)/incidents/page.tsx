@@ -5,7 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { api, qs } from "@/lib/api";
 import { Badge, DataTable, Loading, PageHeader, ConfidenceBar } from "@/components/ui";
 import type { Incident, Page } from "@/lib/types";
-import { fmtDate, timeAgo, titleCase } from "@/lib/ui";
+import { timeAgo, titleCase } from "@/lib/ui";
 
 const SEVERITIES = ["", "critical", "high", "medium", "low"];
 const STATUSES = ["", "new", "triaged", "investigating", "contained", "resolved", "closed"];

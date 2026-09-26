@@ -235,3 +235,31 @@ def test_internal_domain_accounts_can_sign_in(client, admin):
     bad = client.post("/api/v1/rbac/users", headers=admin, json={
         "email": "not-an-email", "password": "Internal!Pass123", "roles": ["auditor"]})
     assert bad.status_code == 422
+
+
+def test_login_options_only_advertise_demo_accounts_when_seeded(client, monkeypatch):
+    from astrasoc.config import settings
+
+    assert client.get("/api/v1/auth/login-options").json()["demo_accounts"] is True  # test env
+    monkeypatch.setattr(settings, "seed_demo_users", False)
+    assert client.get("/api/v1/auth/login-options").json()["demo_accounts"] is False
+
+
+def test_rate_limit_is_per_credential_not_shared_proxy_ip():
+    """Users behind one NAT/reverse proxy must not throttle each other."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from astrasoc.middleware import RateLimitMiddleware
+
+    app = FastAPI()
+    app.add_middleware(RateLimitMiddleware, per_minute=3)
+
+    @app.get("/api/v1/ping")
+    def ping():
+        return {"ok": True}
+
+    c = TestClient(app)
+    alice, bob = {"Authorization": "Bearer alice"}, {"Authorization": "Bearer bob"}
+    assert [c.get("/api/v1/ping", headers=alice).status_code for _ in range(4)] == [200, 200, 200, 429]
+    assert c.get("/api/v1/ping", headers=bob).status_code == 200

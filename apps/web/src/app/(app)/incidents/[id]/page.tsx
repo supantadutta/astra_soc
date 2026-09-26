@@ -3,11 +3,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import {
-  Bot, CheckCircle2, FileText, Network, Play, ShieldQuestion, Sparkles, Zap,
+  Bot, CheckCheck, CheckCircle2, FileText, MessageSquarePlus, ShieldQuestion, Sparkles, Zap,
 } from "lucide-react";
-import { api } from "@/lib/api";
-import { useApp } from "@/lib/store";
-import { Badge, ConfidenceBar, Loading, Modal, Panel, SimBadge } from "@/components/ui";
+import { api, download, errorMessage } from "@/lib/api";
+import { useApp, useLiveEvents } from "@/lib/store";
+import { Badge, ConfidenceBar, ErrorState, Loading, Panel, SimBadge } from "@/components/ui";
+import { SlaClock } from "@/components/mssp";
 import { EntityGraph } from "@/components/EntityGraph";
 import { EVIDENCE_KIND_META, cx, fmtDate, timeAgo, titleCase } from "@/lib/ui";
 
@@ -15,19 +16,44 @@ const TABS = ["Timeline", "Evidence & Hypotheses", "Entity Graph", "Agents", "Re
 
 export default function IncidentWorkspace() {
   const { id } = useParams<{ id: string }>();
-  const { can, mode } = useApp();
+  const { can } = useApp();
   const [data, setData] = useState<any>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [tab, setTab] = useState<(typeof TABS)[number]>("Timeline");
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    setData(await api.get<any>(`/incidents/${id}`));
+    try {
+      setData(await api.get<any>(`/incidents/${id}`));
+    } catch (e) {
+      setLoadError(errorMessage(e));
+    }
   }, [id]);
   useEffect(() => { load(); }, [load]);
+  useLiveEvents((ev) => {
+    if ((ev.type === "incident.updated" || ev.type === "agent.finished" || ev.type === "action.executed")
+        && (ev.incident_id === id || ev.id === id)) load();
+  });
 
+  if (loadError) return <ErrorState message={loadError} />;
   if (!data) return <Loading label="Loading investigation workspace…" />;
   const inc = data.incident;
+
+  async function update(patch: Record<string, unknown>, message: string) {
+    try {
+      await api.patch(`/incidents/${id}`, patch);
+      setToast(message);
+      await load();
+    } catch (e) { setToast(errorMessage(e)); }
+  }
+  async function acknowledge() {
+    try {
+      await api.post(`/incidents/${id}/acknowledge`);
+      setToast("Incident acknowledged — the acknowledgement SLA clock is stopped.");
+      await load();
+    } catch (e) { setToast(errorMessage(e)); }
+  }
 
   async function investigate() {
     setBusy(true);
@@ -60,6 +86,22 @@ export default function IncidentWorkspace() {
             <p className="text-sm text-ink-400 mt-1 max-w-3xl">{inc.summary}</p>
           </div>
           <div className="flex flex-wrap gap-2">
+            {can("incident:write") && !inc.acknowledged_at && (
+              <button className="btn-primary" onClick={acknowledge}><CheckCheck className="w-4 h-4" /> Acknowledge</button>
+            )}
+            {can("incident:write") && (
+              <select className="input !w-auto" value={inc.status} aria-label="Status"
+                onChange={(e) => update({ status: e.target.value }, `Status set to ${titleCase(e.target.value)}.`)}>
+                {["new", "triaged", "investigating", "contained", "resolved", "closed", "false_positive"].map((s) =>
+                  <option key={s} value={s}>{titleCase(s)}</option>)}
+              </select>
+            )}
+            {can("incident:write") && (
+              <select className="input !w-auto" value={inc.severity} aria-label="Severity"
+                onChange={(e) => update({ severity: e.target.value }, `Severity set to ${e.target.value}; SLA targets recalculated.`)}>
+                {["critical", "high", "medium", "low", "info"].map((s) => <option key={s} value={s}>{titleCase(s)}</option>)}
+              </select>
+            )}
             {can("agent:run") && (
               <button className="btn-violet" onClick={investigate} disabled={busy}>
                 <Sparkles className="w-4 h-4" /> {busy ? "Investigating…" : "Run Investigation"}
@@ -69,7 +111,8 @@ export default function IncidentWorkspace() {
         </div>
 
         {/* Meta strip */}
-        <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-3 mt-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3 mt-4">
+          <Meta label="SLA"><SlaClock sla={data.sla} /></Meta>
           <Meta label="Confidence"><ConfidenceBar value={inc.confidence} /></Meta>
           <Meta label="Business Risk"><span className="text-amber font-bold">{Math.round(inc.business_risk)}/100</span></Meta>
           <Meta label="Affected Hosts">{inc.affected_hosts?.length || 0}</Meta>
@@ -103,7 +146,7 @@ export default function IncidentWorkspace() {
         ))}
       </div>
 
-      {tab === "Timeline" && <TimelineTab data={data} />}
+      {tab === "Timeline" && <TimelineTab data={data} reload={load} canWrite={can("incident:write")} setToast={setToast} />}
       {tab === "Evidence & Hypotheses" && <EvidenceTab data={data} reload={load} canPromote={can("evidence:write")} setToast={setToast} />}
       {tab === "Entity Graph" && (
         <Panel title="Entity & Attack Graph">
@@ -126,9 +169,27 @@ function Meta({ label, children }: { label: string; children: React.ReactNode })
   );
 }
 
-function TimelineTab({ data }: { data: any }) {
+function TimelineTab({ data, reload, canWrite, setToast }: any) {
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function addNote(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      await api.post(`/incidents/${data.incident.id}/notes`, { note });
+      setNote("");
+      setToast("Note added to the timeline.");
+      reload();
+    } catch (err) { setToast(errorMessage(err)); } finally { setBusy(false); }
+  }
   return (
     <Panel title="Incident Timeline">
+      {canWrite && (
+        <form onSubmit={addNote} className="flex gap-2 mb-4">
+          <input className="input" placeholder="Add an analyst note…" value={note} onChange={(e) => setNote(e.target.value)} maxLength={10000} />
+          <button className="btn-primary shrink-0" disabled={busy || !note.trim()}><MessageSquarePlus className="w-4 h-4" /> Add note</button>
+        </form>
+      )}
       <div className="relative pl-6">
         <div className="absolute left-2 top-1 bottom-1 w-px bg-white/10" />
         {data.timeline.map((t: any) => (
@@ -150,10 +211,57 @@ function TimelineTab({ data }: { data: any }) {
   );
 }
 
+function AddEvidence({ incidentId, reload, setToast }: any) {
+  const { can } = useApp();
+  const [f, setF] = useState({ kind: "analyst_conclusion", title: "", content: "", source_ref: "", confidence: "1" });
+  const [busy, setBusy] = useState(false);
+  const attesting = f.kind === "confirmed_fact";
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      await api.post(`/incidents/${incidentId}/evidence`, {
+        kind: f.kind, title: f.title, content: f.content, confidence: Number(f.confidence),
+        source_ref: attesting ? f.source_ref : undefined,
+      });
+      setF({ ...f, title: "", content: "", source_ref: "" });
+      setToast(attesting ? "Fact attested with its source reference (recorded in the audit trail)." : "Evidence added.");
+      reload();
+    } catch (err) { setToast(errorMessage(err)); } finally { setBusy(false); }
+  }
+  return (
+    <form onSubmit={submit} className="rounded-lg border border-white/5 p-3 mb-3 space-y-2">
+      <div className="flex gap-2">
+        <select className="input !w-48" value={f.kind} onChange={(e) => setF({ ...f, kind: e.target.value })} aria-label="Evidence kind">
+          <option value="analyst_conclusion">Analyst conclusion</option>
+          <option value="assumption">Assumption</option>
+          <option value="missing_evidence">Missing evidence</option>
+          <option value="recommended_action">Recommended action</option>
+          {can("evidence:attest") && <option value="confirmed_fact">Confirmed fact (attest)</option>}
+        </select>
+        <input className="input" required placeholder="Title" value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })} />
+      </div>
+      <textarea className="input min-h-16" placeholder="Detail" value={f.content} onChange={(e) => setF({ ...f, content: e.target.value })} />
+      {attesting && (
+        <input className="input font-mono" required minLength={6} placeholder="Source reference, e.g. edr:event/88213 or siem:search/abc"
+          value={f.source_ref} onChange={(e) => setF({ ...f, source_ref: e.target.value })} />
+      )}
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[11px] text-ink-500">
+          {attesting ? "Confirmed facts must cite where they were observed; you are accountable for the attestation."
+            : "Only tools and attested sources create confirmed facts; analyst input is labelled as such."}
+        </span>
+        <button className="btn-primary !py-1 !text-xs shrink-0" disabled={busy || !f.title}>Add evidence</button>
+      </div>
+    </form>
+  );
+}
+
 function EvidenceTab({ data, reload, canPromote, setToast }: any) {
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
       <Panel title="Evidence" actions={<span className="text-[11px] text-ink-500">Facts vs inferences kept distinct</span>}>
+        {canPromote && <AddEvidence incidentId={data.incident.id} reload={reload} setToast={setToast} />}
         <div className="space-y-2 max-h-[520px] overflow-y-auto pr-1">
           {data.evidence.map((e: any) => {
             const meta = EVIDENCE_KIND_META[e.kind] || { label: e.kind, color: "", note: "" };
@@ -165,7 +273,10 @@ function EvidenceTab({ data, reload, canPromote, setToast }: any) {
                 </div>
                 <div className="text-sm text-ink-100">{e.title}</div>
                 <div className="text-xs text-ink-400 mt-1">{e.content}</div>
-                <div className="text-[10px] text-ink-500 mt-1 font-mono">evidence:{e.id.slice(0, 8)} · conf {Math.round(e.confidence * 100)}%</div>
+                <div className="text-[10px] text-ink-500 mt-1 font-mono">
+                  evidence:{e.id.slice(0, 8)} · conf {Math.round(e.confidence * 100)}% · {e.produced_by}
+                  {e.source_ref && <> · src {e.source_ref}</>}
+                </div>
               </div>
             );
           })}
@@ -254,7 +365,6 @@ function AgentsTab({ data }: { data: any }) {
 function ResponseTab({ data, incidentId, reload, setToast }: any) {
   const { can } = useApp();
   const [recs, setRecs] = useState<any[]>([]);
-  const [modal, setModal] = useState<any>(null);
 
   useEffect(() => {
     api.get<any>(`/incidents/${incidentId}/recommended-actions`).then((r) => setRecs(r.recommendations)).catch(() => {});
@@ -345,7 +455,10 @@ function ReportsTab({ incidentId, setToast }: any) {
             <h4 className="font-semibold text-ink-100">{report.title}</h4>
             <div className="flex gap-2">
               {["json", "csv", "html", "pdf"].map((f) => (
-                <a key={f} className="btn-ghost !py-1 !text-xs" href={`/api/v1/reports/${report.id}/export?format=${f}`} target="_blank" rel="noreferrer">{f.toUpperCase()}</a>
+                <button key={f} className="btn-ghost !py-1 !text-xs"
+                  onClick={() => download(`/reports/${report.id}/export?format=${f}`, `${report.id}.${f}`).catch((e) => setToast(errorMessage(e)))}>
+                  {f.toUpperCase()}
+                </button>
               ))}
             </div>
           </div>

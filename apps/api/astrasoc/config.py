@@ -72,6 +72,10 @@ class Settings(BaseSettings):
 
     # --- Rate limiting ----------------------------------------------------
     rate_limit_per_minute: int = 600
+    # Login/refresh attempts per client IP per minute (per-account lockout is
+    # the primary brute-force control). Raise it when many analysts share one
+    # egress IP (corporate NAT / VPN) and sign in together at shift change.
+    auth_rate_limit_per_minute: int = 20
     # Only honour X-Forwarded-For when the direct peer is one of these proxies
     # (comma-separated IPs/CIDRs), e.g. the ingress controller.
     trusted_proxies: str = ""

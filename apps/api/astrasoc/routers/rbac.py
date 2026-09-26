@@ -29,7 +29,7 @@ from ..models import Session as SessionModel
 from ..schemas.common import serialize, serialize_many
 from ..services import audit
 from ..services.tenancy import accessible_tenants, delegation_policy
-from ..services.tenants import TenantError
+from ..services.tenants import TenantError, clean_branding, clean_contacts
 from ..services.tenants import create_user as provision_user
 
 router = APIRouter(prefix="/api/v1/rbac", tags=["rbac"])
@@ -257,9 +257,7 @@ tenants_router = APIRouter(prefix="/api/v1/tenants", tags=["tenants"])
 
 # Fields a customer may manage itself. Tier, SLA, status and hierarchy are
 # contractual and managed by the provider via /api/v1/mssp/tenants.
-_SELF_SERVICE_FIELDS = ("branding", "contacts")
-
-
+_NON_DELEGABLE_ROLES = {"tenant_admin", "customer_admin", "platform_super_admin"}
 @tenants_router.get("")
 def list_accessible(principal: Principal = Depends(get_current_principal),
                     db: Session = Depends(get_db)) -> dict:
@@ -291,18 +289,35 @@ def update_current_tenant(payload: dict = Body(...),
     policy that controls provider access. Only the tenant's OWN users (not
     delegated provider staff) may change the delegation policy."""
     t = _tenant(db, principal)
-    for f in _SELF_SERVICE_FIELDS:
-        if f in payload:
-            setattr(t, f, payload[f])
+    try:
+        if "branding" in payload:
+            t.branding = clean_branding(payload["branding"])
+        if "contacts" in payload:
+            t.contacts = clean_contacts(payload["contacts"])
+    except TenantError as exc:
+        raise HTTPException(422, detail={"error": exc.code, "message": exc.message})
     if "delegation" in payload:
         if principal.is_delegated:
             raise HTTPException(403, detail={
                 "error": "customer_only", "message": "Only the customer can change provider access."})
         pol = payload["delegation"] or {}
+        if not isinstance(pol, dict):
+            raise HTTPException(422, detail="delegation must be an object")
+        default_role = str(pol.get("default_provider_role", "soc_manager"))
+        allowed = pol.get("allowed_roles") or []
+        if not isinstance(allowed, list):
+            raise HTTPException(422, detail="allowed_roles must be a list")
+        allowed = [str(r) for r in allowed]
+        existing = set(db.execute(select(Role.name).where(Role.tenant_id == t.id)).scalars())
+        for r in [default_role, *allowed]:
+            if r not in existing:
+                raise HTTPException(422, detail=f"Unknown role '{r}'")
+            if r in _NON_DELEGABLE_ROLES:
+                raise HTTPException(422, detail=f"Role '{r}' cannot be delegated to provider staff")
         t.settings = {**(t.settings or {}), "delegation": {
             "allow_provider_access": bool(pol.get("allow_provider_access", True)),
-            "default_provider_role": str(pol.get("default_provider_role", "soc_manager")),
-            "allowed_roles": list(pol.get("allowed_roles") or []),
+            "default_provider_role": default_role,
+            "allowed_roles": allowed,
         }}
     audit.record(db, action="tenant.self_service_update", actor_id=principal.user_id,
                  actor_label=principal.label, tenant_id=t.id, resource_type="tenant",

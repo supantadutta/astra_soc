@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { Chart } from "@/components/Chart";
 import { Loading, PageHeader, Panel, StatTile } from "@/components/ui";
-import { num } from "@/lib/ui";
+import {  } from "@/lib/ui";
 
 export default function PerformancePage() {
   const [ov, setOv] = useState<any>(null);

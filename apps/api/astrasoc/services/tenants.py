@@ -198,8 +198,9 @@ def provision_tenant(
 
     tenant = Tenant(
         name=name.strip(), slug=slug, kind=kind, parent_id=parent_id, service_tier=tier,
-        region=region or "global", sla_policy=sla_policy or {}, contacts=contacts or [],
-        branding=branding or {}, settings=settings or {}, status=status,
+        region=region or "global", sla_policy=clean_sla_policy(sla_policy),
+        contacts=clean_contacts(contacts), branding=clean_branding(branding),
+        settings=settings or {}, status=status,
         is_active=status in ("active", "onboarding"),
         contract_start=contract_start, contract_end=contract_end,
     )
@@ -307,3 +308,69 @@ def purge_tenant(db: Session, tenant: Tenant) -> dict:
 
 def global_registry_ready(db: Session) -> bool:
     return db.execute(select(Agent).limit(1)).first() is not None
+
+
+# --- Self-service profile fields (validated; shown in reports and escalations) ---
+_BRANDING_KEYS = {"display_name": 120, "primary_color": 7, "logo_url": 500, "report_footer": 500}
+
+
+def clean_branding(value) -> dict:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise TenantError("invalid", "branding must be an object")
+    out = {}
+    for k, v in value.items():
+        if v in (None, ""):
+            continue
+        if k not in _BRANDING_KEYS or not isinstance(v, str) or len(v) > _BRANDING_KEYS[k]:
+            raise TenantError("invalid", f"Invalid branding field '{k}'")
+        if k == "primary_color" and not re.fullmatch(r"#[0-9a-fA-F]{6}|#[0-9a-fA-F]{3}", v):
+            raise TenantError("invalid", "primary_color must be a hex color like #0ea5e9")
+        if k == "logo_url" and not v.startswith("https://"):
+            raise TenantError("invalid", "logo_url must be an https:// URL")
+        out[k] = v
+    return out
+
+
+def clean_contacts(value) -> list:
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > 25:
+        raise TenantError("invalid", "contacts must be a list of at most 25 entries")
+    out = []
+    for c in value:
+        if not isinstance(c, dict) or not is_valid_email(str(c.get("email", ""))):
+            raise TenantError("invalid", "Each contact needs a valid email")
+        out.append({k: str(c[k])[:200] for k in ("role", "email", "phone", "name") if c.get(k)})
+    return out
+
+
+_SEVERITIES = ("critical", "high", "medium", "low", "info")
+
+
+def clean_sla_policy(value) -> dict:
+    """Per-severity SLA overrides in minutes: {"critical": {"ack": 15, "resolve": 240}}."""
+    if value in (None, {}):
+        return {}
+    if not isinstance(value, dict):
+        raise TenantError("invalid", "sla_policy must be an object")
+    out: dict = {}
+    for sev, targets in value.items():
+        if sev not in _SEVERITIES or not isinstance(targets, dict):
+            raise TenantError("invalid", f"Invalid SLA severity '{sev}'")
+        clean = {}
+        for k, v in targets.items():
+            if k not in ("ack", "resolve"):
+                raise TenantError("invalid", f"Invalid SLA target '{k}'")
+            try:
+                minutes = int(v)
+            except (TypeError, ValueError):
+                raise TenantError("invalid", "SLA targets must be whole minutes") from None
+            if not 1 <= minutes <= 60 * 24 * 90:
+                raise TenantError("invalid", "SLA targets must be between 1 minute and 90 days")
+            clean[k] = minutes
+        if clean:
+            out[sev] = clean
+    return out
+

@@ -146,7 +146,7 @@ export function DataTable<T extends { id?: string }>({
 }) {
   if (!rows.length) return <EmptyState label={empty} />;
   return (
-    <div className="overflow-x-auto -mx-1">
+    <div className="overflow-x-auto max-w-full">
       <table className="w-full text-sm min-w-[640px]">
         <thead>
           <tr className="text-left border-b border-white/5">
@@ -196,11 +196,13 @@ export function Modal({
   if (!open) return null;
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center p-4 pt-20 bg-black/70 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-start justify-center p-3 pt-10 sm:p-4 sm:pt-20 bg-black/70 backdrop-blur-sm overflow-y-auto"
+      role="dialog"
+      aria-modal="true"
       onClick={onClose}
     >
       <div
-        className={cx("panel w-full max-h-[80vh] overflow-y-auto", wide ? "max-w-3xl" : "max-w-lg")}
+        className={cx("panel w-full max-w-[calc(100vw-1.5rem)] max-h-[85vh] overflow-y-auto overflow-x-hidden min-w-0", wide ? "sm:max-w-3xl" : "sm:max-w-lg")}
         onClick={(e) => e.stopPropagation()}
       >
         <header className="flex items-center justify-between p-4 border-b border-white/5 sticky top-0 bg-navy-800/95 backdrop-blur">

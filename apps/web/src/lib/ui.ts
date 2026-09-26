@@ -77,8 +77,14 @@ export function fmtDate(iso?: string): string {
   });
 }
 
+const ACRONYMS = new Set(["soc", "mssp", "sla", "ai", "llm", "ip", "edr", "siem", "api", "ciso", "id", "dns", "ioc", "ttp", "mfa", "vpn", "us", "eu", "uk", "apac"]);
+
 export function titleCase(s: string): string {
-  return s.replace(/[_-]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  return (s || "")
+    .replace(/[_-]/g, " ")
+    .split(" ")
+    .map((w) => (ACRONYMS.has(w.toLowerCase()) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)))
+    .join(" ");
 }
 
 export function num(n: number | null | undefined, digits = 0): string {

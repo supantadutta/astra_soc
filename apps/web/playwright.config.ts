@@ -25,8 +25,9 @@ export default defineConfig({
         launchOptions: { executablePath: CHROME },
       },
     },
-    // Responsive checks (tablet + mobile) reuse the same specs.
-    { name: "tablet", use: { ...devices["iPad Pro 11"], launchOptions: { executablePath: CHROME } } },
+    // Responsive checks (tablet + mobile) reuse the same specs. The iPad
+    // profile defaults to WebKit; run its viewport/touch settings in Chromium.
+    { name: "tablet", use: { ...devices["iPad Pro 11"], browserName: "chromium", launchOptions: { executablePath: CHROME } } },
     { name: "mobile", use: { ...devices["Pixel 7"], launchOptions: { executablePath: CHROME } } },
   ],
 });

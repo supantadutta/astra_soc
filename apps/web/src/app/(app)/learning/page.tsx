@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { FlaskConical, ArrowRight } from "lucide-react";
 import { api } from "@/lib/api";
 import { useApp } from "@/lib/store";
-import { Badge, Loading, PageHeader, Panel } from "@/components/ui";
+import { Badge, PageHeader, Panel } from "@/components/ui";
 import { fmtDate, titleCase } from "@/lib/ui";
 
 export default function LearningPage() {
@@ -25,6 +25,7 @@ export default function LearningPage() {
       setPipeline(p.stages); setFeedback(f); setDatasets(d.items); setRuns(r.items);
     }
   }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- reload only when filters change
   useEffect(() => { load(); }, [manage]);
 
   async function buildDataset() {

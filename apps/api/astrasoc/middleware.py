@@ -2,6 +2,7 @@
 body-size limit and a per-client rate limiter."""
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import time
 import uuid
@@ -90,13 +91,12 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    """Sliding-window limiter keyed by client IP (in-memory, per process).
+    """Sliding-window limiter (in-memory, per process): keyed by credential for
+    authenticated requests and by client IP otherwise.
 
     Authentication endpoints get a much tighter budget to slow credential
     stuffing (on top of per-account lockout). Multi-replica deployments
     should front this with the ingress controller's rate limiting."""
-
-    AUTH_PER_MINUTE = 20
 
     def __init__(self, app, per_minute: int | None = None) -> None:
         super().__init__(app)
@@ -109,8 +109,18 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         ip = client_ip(request)
         is_auth = path in ("/api/v1/auth/login", "/api/v1/auth/refresh")
-        key = f"auth:{ip}" if is_auth else ip
-        limit = self.AUTH_PER_MINUTE if is_auth and settings.environment != "test" else self.per_minute
+        credential = request.headers.get("authorization") or request.headers.get("x-api-key")
+        if is_auth:
+            key = f"auth:{ip}"
+        elif credential:
+            # Authenticated traffic is budgeted per credential, so users behind
+            # one NAT / reverse proxy do not throttle each other. (Unverified
+            # here; an invalid credential still costs the caller a 401.)
+            key = "cred:" + hashlib.sha256(credential.encode()).hexdigest()[:24]
+        else:
+            key = ip
+        limit = (settings.auth_rate_limit_per_minute
+                 if is_auth and settings.environment != "test" else self.per_minute)
         now = time.time()
         window = self._hits[key]
         while window and window[0] < now - 60:

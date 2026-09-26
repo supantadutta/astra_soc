@@ -64,6 +64,14 @@ def _issue(db: Session, user: User, request: Request) -> TokenResponse:
                          expires_in=settings.access_token_ttl_seconds)
 
 
+@router.get("/login-options")
+def login_options() -> dict:
+    """Unauthenticated: tells the sign-in page whether the well-known demo
+    accounts exist, so production deployments never advertise them."""
+    return {"demo_accounts": settings.should_seed_demo_users,
+            "environment": "demo" if settings.should_seed_demo_users else "standard"}
+
+
 @router.post("/login", response_model=TokenResponse)
 def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)) -> TokenResponse:
     email = normalize_email(body.email)

@@ -22,6 +22,7 @@ export default function ConnectorsPage() {
     const r = await api.get<any>(`/connectors${cat ? `?category=${cat}` : ""}`);
     setItems(r.items);
   }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- reload only when filters change
   useEffect(() => { load(); }, [cat]);
 
   async function test(id: string) {

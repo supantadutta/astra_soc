@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Pause, Play, RotateCcw, Rocket, Gauge } from "lucide-react";
 import { api } from "@/lib/api";
 import { Badge, Loading, PageHeader, Panel } from "@/components/ui";
-import { titleCase } from "@/lib/ui";
+import {  } from "@/lib/ui";
 
 export default function DemoPage() {
   const router = useRouter();

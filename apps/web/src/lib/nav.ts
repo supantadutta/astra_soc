@@ -4,14 +4,28 @@ export interface NavItem {
   href: string;
   label: string;
   icon: keyof typeof Icons;
+  /** Permission in the tenant the user is acting in. */
   permission?: string;
+  /** Permission in the user's home (provider) tenant — MSSP portfolio pages. */
+  homePermission?: string;
   group: string;
 }
 
 export const NAV: NavItem[] = [
+  // Managed-service (provider) views — work across every accessible customer.
+  { href: "/mssp", label: "Portfolio", icon: "Building2", group: "Managed Service", homePermission: "mssp:portfolio" },
+  { href: "/mssp/queue", label: "Unified Queue", icon: "ListOrdered", group: "Managed Service", homePermission: "mssp:portfolio" },
+  { href: "/mssp/sla", label: "SLA Compliance", icon: "Timer", group: "Managed Service", homePermission: "mssp:portfolio" },
+  { href: "/mssp/customers", label: "Customers", icon: "Briefcase", group: "Managed Service", homePermission: "mssp:portfolio" },
+  { href: "/mssp/access", label: "Delegated Access", icon: "KeyRound", group: "Managed Service", homePermission: "mssp:grants" },
+  { href: "/mssp/content", label: "Content Distribution", icon: "PackageCheck", group: "Managed Service", homePermission: "mssp:content" },
+  { href: "/mssp/handover", label: "Shift Handover", icon: "ArrowRightLeft", group: "Managed Service", homePermission: "mssp:handover" },
+  { href: "/mssp/billing", label: "Usage & Billing", icon: "Receipt", group: "Managed Service", homePermission: "mssp:billing" },
+
   { href: "/dashboard", label: "SOC Overview", icon: "LayoutDashboard", group: "Operate", permission: "incident:read" },
   { href: "/alerts", label: "Alerts", icon: "Siren", group: "Operate", permission: "alert:read" },
   { href: "/incidents", label: "Incidents", icon: "AlertTriangle", group: "Operate", permission: "incident:read" },
+  { href: "/notifications", label: "Notifications", icon: "Bell", group: "Operate", permission: "notification:read" },
   { href: "/entities", label: "Entity Graph", icon: "Network", group: "Investigate", permission: "entity:read" },
   { href: "/attack-paths", label: "Attack-Path Explorer", icon: "GitBranch", group: "Investigate", permission: "entity:read" },
   { href: "/timeline", label: "Evidence Timeline", icon: "ListTree", group: "Investigate", permission: "incident:read" },
@@ -31,9 +45,10 @@ export const NAV: NavItem[] = [
   { href: "/platform-health", label: "Platform Health", icon: "Database", group: "Platform", permission: "health:read" },
   { href: "/audit", label: "Audit Logs", icon: "ScrollText", group: "Govern", permission: "audit:read" },
   { href: "/rbac", label: "RBAC", icon: "Lock", group: "Govern", permission: "rbac:manage" },
-  { href: "/tenants", label: "Tenant Management", icon: "Layers", group: "Govern", permission: "tenant:manage" },
+  { href: "/tenants", label: "Organization", icon: "Layers", group: "Govern", permission: "tenant:manage" },
+  { href: "/account", label: "My Account", icon: "UserCog", group: "Govern" },
   { href: "/settings", label: "System Settings", icon: "Settings", group: "Govern", permission: "settings:manage" },
   { href: "/demo", label: "Demo Control Center", icon: "FlaskConical", group: "Govern", permission: "demo:manage" },
 ];
 
-export const NAV_GROUPS = ["Operate", "Investigate", "Engineer", "Respond", "Platform", "Govern"];
+export const NAV_GROUPS = ["Managed Service", "Operate", "Investigate", "Engineer", "Respond", "Platform", "Govern"];

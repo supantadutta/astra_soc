@@ -8,7 +8,7 @@ import { useApp } from "@/lib/store";
 
 export function CommandPalette({ open, setOpen }: { open: boolean; setOpen: (v: boolean) => void }) {
   const router = useRouter();
-  const { can } = useApp();
+  const { can, canHome } = useApp();
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
 
@@ -25,11 +25,11 @@ export function CommandPalette({ open, setOpen }: { open: boolean; setOpen: (v: 
   }, [setOpen]);
 
   const results = useMemo(() => {
-    const items = NAV.filter((n) => !n.permission || can(n.permission));
+    const items = NAV.filter((n) => (!n.permission || can(n.permission)) && (!n.homePermission || canHome(n.homePermission)));
     if (!query) return items;
     const q = query.toLowerCase();
     return items.filter((n) => n.label.toLowerCase().includes(q) || n.group.toLowerCase().includes(q));
-  }, [query, can]);
+  }, [query, can, canHome]);
 
   useEffect(() => setActive(0), [query]);
 

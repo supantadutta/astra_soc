@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { FileText } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, download, errorMessage } from "@/lib/api";
 import { useApp } from "@/lib/store";
 import { Badge, DataTable, Loading, PageHeader, Panel } from "@/components/ui";
 import { fmtDate, titleCase } from "@/lib/ui";
@@ -56,7 +56,10 @@ export default function ReportsPage() {
                 key: "export", header: "Export", render: (r: any) => (
                   <div className="flex gap-1" onClick={(e) => e.stopPropagation()}>
                     {["json", "csv", "html", "pdf"].map((f) => (
-                      <a key={f} className="btn-ghost !py-0.5 !px-1.5 !text-[10px]" href={`/api/v1/reports/${r.id}/export?format=${f}`} target="_blank" rel="noreferrer">{f.toUpperCase()}</a>
+                      <button key={f} className="btn-ghost !py-0.5 !px-1.5 !text-[10px]"
+                        onClick={() => download(`/reports/${r.id}/export?format=${f}`, `${r.id}.${f}`).catch((e) => alert(errorMessage(e)))}>
+                        {f.toUpperCase()}
+                      </button>
                     ))}
                   </div>
                 )

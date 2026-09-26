@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Cpu, Plus, Zap } from "lucide-react";
+import { Cpu, Plus } from "lucide-react";
 import { api } from "@/lib/api";
 import { useApp } from "@/lib/store";
 import { Badge, Loading, Modal, PageHeader, Panel } from "@/components/ui";

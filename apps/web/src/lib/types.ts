@@ -6,6 +6,54 @@ export interface Me {
   roles: string[];
   permissions: string[];
   is_service_account: boolean;
+  tenant_slug: string;
+  tenant_name: string;
+  tenant_kind: "provider" | "reseller" | "customer" | string;
+  home_tenant_id: string;
+  home_tenant_slug: string;
+  home_permissions: string[];
+  delegated_via: "platform" | "break_glass" | "provider" | "grant" | null;
+}
+
+/** A tenant the user may act in (drives the tenant switcher). */
+export interface AccessibleTenant {
+  id: string;
+  name: string;
+  slug: string;
+  kind: string;
+  status: string;
+  service_tier: string;
+  region: string;
+  role: string;
+  via: "home" | "platform" | "break_glass" | "provider" | "grant";
+  branding: Record<string, any>;
+}
+
+export interface SlaTarget {
+  due: string | null;
+  state: "breached" | "at_risk" | "on_track" | "met" | "n/a";
+  minutes_remaining: number | null;
+  completed_at?: string;
+}
+
+export interface SlaState {
+  ack: SlaTarget;
+  resolve: SlaTarget;
+  overall: SlaTarget["state"];
+  escalation_level: number;
+}
+
+export interface Notification {
+  id: string;
+  title: string;
+  body?: string;
+  level: string;
+  category: string;
+  link?: string;
+  channel?: string;
+  delivery_status?: string;
+  read_at?: string | null;
+  created_at: string;
 }
 
 export interface ModeState {
@@ -48,6 +96,8 @@ export interface Incident {
   created_at: string;
   updated_at: string;
   owner_id?: string;
+  acknowledged_at?: string | null;
+  sla?: SlaState;
 }
 
 export interface Alert {

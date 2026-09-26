@@ -46,6 +46,9 @@ from ..services.tenancy import (
 from ..services.tenants import (
     STATUSES,
     TenantError,
+    clean_branding,
+    clean_contacts,
+    clean_sla_policy,
     create_user,
     export_tenant,
     provision_tenant,
@@ -369,15 +372,21 @@ def update_tenant(tenant_id: uuid.UUID, payload: dict = Body(...),
             raise HTTPException(422, detail=f"status must be one of {STATUSES}")
         t.status = payload["status"]
         t.is_active = t.status in ("active", "onboarding")
-    for field in ("name", "region", "contacts", "branding"):
+    for field in ("name", "region"):
         if field in payload:
-            setattr(t, field, payload[field])
+            setattr(t, field, str(payload[field])[:200])
+    try:
+        if "contacts" in payload:
+            t.contacts = clean_contacts(payload["contacts"])
+        if "branding" in payload:
+            t.branding = clean_branding(payload["branding"])
+    except TenantError as exc:
+        raise HTTPException(422, detail={"error": exc.code, "message": exc.message})
     if "sla_policy" in payload:
-        pol = payload["sla_policy"] or {}
-        for tgt in pol.values():
-            if not isinstance(tgt, dict) or any(int(v) <= 0 for v in tgt.values()):
-                raise HTTPException(422, detail="SLA targets must be positive minutes")
-        t.sla_policy = pol
+        try:
+            t.sla_policy = clean_sla_policy(payload["sla_policy"])
+        except TenantError as exc:
+            raise HTTPException(422, detail={"error": exc.code, "message": exc.message})
     for field in ("contract_start", "contract_end"):
         if field in payload:
             setattr(t, field, _dt(payload[field]))

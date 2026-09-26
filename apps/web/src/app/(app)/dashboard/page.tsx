@@ -2,12 +2,12 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Activity, ShieldAlert, Cpu, Boxes, Zap, Clock } from "lucide-react";
+import { Activity, Cpu, Boxes, Clock } from "lucide-react";
 import { api } from "@/lib/api";
-import { useApp, useEventStream } from "@/lib/store";
+import { useApp, useLiveEvents } from "@/lib/store";
 import { Chart } from "@/components/Chart";
 import { Badge, Loading, Panel, PageHeader, StatTile } from "@/components/ui";
-import { num, titleCase, timeAgo } from "@/lib/ui";
+import { num, titleCase } from "@/lib/ui";
 
 export default function DashboardPage() {
   const { mode } = useApp();
@@ -29,7 +29,7 @@ export default function DashboardPage() {
     api.get<any>("/dashboard/live-events?limit=18").then((r) => setEvents(r.events)).catch(() => {});
   }, []);
 
-  useEventStream(mode?.mode, (ev) => {
+  useLiveEvents((ev) => {
     if (ev.type === "event.ingested" || ev.type === "alert.created" || ev.type === "incident.created") {
       setEvents((prev) => [ev, ...prev].slice(0, 18));
     }
@@ -88,7 +88,7 @@ export default function DashboardPage() {
           {ov.attack_tactics.length ? (
             <Chart
               height={260}
-              onEvents={{ click: (p: any) => router.push(`/incidents`) }}
+              onEvents={{ click: () => router.push(`/incidents`) }}
               option={{
                 tooltip: { trigger: "item", formatter: "{b}: {c} ({d}%)" },
                 legend: { type: "scroll", orient: "vertical", right: 4, top: "middle",

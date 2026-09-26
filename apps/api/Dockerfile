@@ -30,4 +30,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
 # --proxy-headers is safe: uvicorn only trusts X-Forwarded-* from
 # FORWARDED_ALLOW_IPS (loopback unless set). Client IPs for audit/rate
 # limiting use ASTRASOC_TRUSTED_PROXIES.
-CMD ["uvicorn", "astrasoc.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
+# Live SSE streams never complete on their own, so graceful shutdown is
+# bounded; browsers reconnect automatically with a fresh stream ticket.
+CMD ["uvicorn", "astrasoc.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", \
+     "--timeout-graceful-shutdown", "10"]

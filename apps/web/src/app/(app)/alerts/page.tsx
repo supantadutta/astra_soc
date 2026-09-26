@@ -21,6 +21,7 @@ export default function AlertsPage() {
   async function load() {
     setData(await api.get<Page<Alert>>(`/alerts${qs({ severity, status, q, page_size: 30 })}`));
   }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- reload only when filters change
   useEffect(() => { load(); }, [severity, status, q]);
 
   async function act(id: string, action: "acknowledge" | "promote") {

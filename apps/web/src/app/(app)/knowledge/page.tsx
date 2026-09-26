@@ -17,6 +17,7 @@ export default function KnowledgePage() {
   const [toast, setToast] = useState<string | null>(null);
 
   async function load() { setDocs(await api.get<any>(`/knowledge/documents${scope ? `?scope=${scope}` : ""}`)); }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- reload only when filters change
   useEffect(() => { load(); }, [scope]);
 
   async function search() {

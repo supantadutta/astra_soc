@@ -20,6 +20,7 @@ export default function ApprovalsPage() {
     setItems(r.items);
     setLoading(false);
   }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- reload only when filters change
   useEffect(() => { load(); }, [status]);
 
   async function decide(id: string, decision: "approve" | "reject") {

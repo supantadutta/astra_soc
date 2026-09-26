@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { Bot, Cpu, Timer, Coins } from "lucide-react";
 import { api } from "@/lib/api";
-import { Badge, Loading, Panel, PageHeader, SimBadge } from "@/components/ui";
+import { Badge, Panel, PageHeader, SimBadge } from "@/components/ui";
 import { titleCase, timeAgo } from "@/lib/ui";
 
 export default function AgentsPage() {

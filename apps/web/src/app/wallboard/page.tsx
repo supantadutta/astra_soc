@@ -13,7 +13,7 @@ export default function WallboardPage() {
 }
 
 function Board() {
-  const { mode } = useApp();
+  const { me, mode, tenantKey } = useApp();
   const [ov, setOv] = useState<any>(null);
   const [events, setEvents] = useState<any[]>([]);
   const [clock, setClock] = useState("");
@@ -26,7 +26,7 @@ function Board() {
     return () => { clearInterval(t); clearInterval(c); };
   }, []);
 
-  useEventStream(mode?.mode, (ev) => {
+  useEventStream(!!me, tenantKey, (ev) => {
     if (["event.ingested", "alert.created", "incident.created"].includes(ev.type)) {
       setEvents((prev) => [ev, ...prev].slice(0, 12));
     }

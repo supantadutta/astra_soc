@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { api } from "@/lib/api";
-import { Badge, Loading, PageHeader, Panel } from "@/components/ui";
+import { Loading, PageHeader, Panel } from "@/components/ui";
 import { EVIDENCE_KIND_META, cx, fmtDate } from "@/lib/ui";
 
 export default function TimelinePage() {

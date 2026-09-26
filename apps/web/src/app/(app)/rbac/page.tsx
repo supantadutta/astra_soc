@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { Lock, Plus } from "lucide-react";
 import { api } from "@/lib/api";
-import { Badge, Loading, Modal, PageHeader, Panel } from "@/components/ui";
+import { Modal, PageHeader, Panel } from "@/components/ui";
 import { titleCase } from "@/lib/ui";
 
 export default function RBACPage() {

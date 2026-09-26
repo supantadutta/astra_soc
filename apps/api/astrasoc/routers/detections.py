@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import UTC, datetime
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy import select
@@ -162,8 +161,8 @@ def replay(rule_id: uuid.UUID,
         raise HTTPException(404, detail="Rule not found")
     scope = current_scope(db, principal.tenant_id)
     result = replay_rule(db, principal.tenant_id, r, scope)
-    r.last_triggered_at = datetime.now(UTC) if result["matches"] else r.last_triggered_at
-    r.trigger_count = (r.trigger_count or 0) + result["matches"]
+    # A replay is a test over historical events: it must not inflate the
+    # rule's live trigger statistics (trigger_count / last_triggered_at).
     if result["labelled"]:
         r.precision, r.recall = result["precision"], result["recall"]
     db.commit()
