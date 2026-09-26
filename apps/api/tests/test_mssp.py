@@ -276,3 +276,25 @@ def test_me_reports_acting_tenant_and_delegation(client, mssp_soc):
     # Acting permissions are the customer's; portfolio authority stays at home.
     assert "mssp:portfolio" not in acting["permissions"]
     assert "mssp:portfolio" in acting["home_permissions"]
+
+
+def test_profile_and_contract_fields_are_validated(client, acme_ciso, mssp_soc):
+    bad = [{"branding": {"primary_color": "red;}</style><script>"}},
+           {"branding": {"logo_url": "javascript:alert(1)"}},
+           {"branding": {"unknown_key": "x"}},
+           {"contacts": [{"email": "nope"}]},
+           {"delegation": {"allow_provider_access": True, "default_provider_role": "customer_admin"}},
+           {"delegation": {"allow_provider_access": True, "default_provider_role": "no_such_role"}}]
+    for body in bad:
+        assert client.patch("/api/v1/tenants/current", headers=acme_ciso, json=body).status_code == 422, body
+    ok = client.patch("/api/v1/tenants/current", headers=acme_ciso, json={
+        "branding": {"display_name": "Acme SecOps", "primary_color": "#0ea5e9"},
+        "contacts": [{"role": "security", "email": "soc@acme.io"}]})
+    assert ok.status_code == 200
+    acme = next(t for t in client.get("/api/v1/mssp/tenants", headers=mssp_soc).json()["items"]
+                if t["slug"] == "acme")
+    for pol in ({"critical": {"ack": -5}}, {"critical": {"bogus": 5}}, {"nope": {"ack": 5}}):
+        r = client.patch(f"/api/v1/mssp/tenants/{acme['id']}", headers=mssp_soc, json={"sla_policy": pol})
+        assert r.status_code == 422, pol
+    assert client.patch(f"/api/v1/mssp/tenants/{acme['id']}", headers=mssp_soc,
+                        json={"branding": {"logo_url": "http://insecure"}}).status_code == 422

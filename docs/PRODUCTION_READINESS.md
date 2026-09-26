@@ -1,28 +1,41 @@
 # Production Readiness Checklist
 
-## Must do before LIVE
-- [ ] Set a strong `ASTRASOC_JWT_SECRET` (32+ random bytes).
-- [ ] Rotate/disable all demo accounts; enforce SSO/OIDC or strong passwords.
-- [ ] Use PostgreSQL (not SQLite); run `alembic upgrade head`.
-- [ ] Put secrets in Vault/Secrets Manager; verify every `vault://` reference resolves.
-- [ ] Configure at least one real, enabled, non-mock connector.
-- [ ] Configure LLM providers (or disable AI) and Test connectivity.
-- [ ] Review and tune the response policy (`SystemSetting['response_policy']`).
-- [ ] Confirm approval roles match your org's authority model.
-- [ ] Terminate TLS at the ingress; set exact CORS origins.
-- [ ] Back rate-limiting with Redis if multi-node.
-- [ ] Set up backups (DB + secrets) and test a restore.
-- [ ] Wire observability (OTel → Prometheus/Grafana; logs → OpenSearch).
+Work through this before putting customer data on the platform.
 
-## Should do
-- [ ] Implement real `execute_action`/`verify_action` for each connector you
-      intend to use for response (see KNOWN_LIMITATIONS).
-- [ ] Point durable workflows at Temporal; policy at OPA; retrieval at pgvector.
-- [ ] Enable per-tenant budgets and private-model-only policies as needed.
-- [ ] Add malware-scanning + file-type/size validation to any upload paths.
-- [ ] Load-test ingestion and the response pipeline.
+## Enforced automatically
 
-## Verify
-- [ ] `make test` green; `make build` succeeds; `docker compose config` valid.
-- [ ] `GET /api/v1/audit/verify` returns `verified: true`.
-- [ ] Mode readiness checks pass before flipping to LIVE.
+The API refuses to start in production unless these hold:
+
+- [x] Strong `ASTRASOC_JWT_SECRET` and a different, strong `ASTRASOC_AUDIT_KEY`
+- [x] PostgreSQL (not SQLite), schema at the latest migration
+- [x] No wildcard CORS
+- [x] Demo accounts disabled; unsafe secret schemes disabled
+
+## You must do
+
+- [ ] TLS in front of the platform; HSTS is sent by the API in production.
+- [ ] `ASTRASOC_TRUSTED_PROXIES` set to your ingress/proxy network.
+- [ ] Managed PostgreSQL with automated backups and tested restores.
+- [ ] `ASTRASOC_AUDIT_KEY` backed up separately from the database.
+- [ ] Vault (or another secret store you front with `vault://` references)
+      configured; no plaintext credentials anywhere.
+- [ ] `ASTRASOC_EGRESS_HOST_ALLOWLIST` set to the integrations you actually use.
+- [ ] Bootstrap administrator signs in, changes the password, and creates
+      named accounts; the bootstrap credentials are removed from the
+      environment.
+- [ ] Monitoring on `/api/v1/health/ready`, container restarts, and a periodic
+      `GET /api/v1/audit/verify`.
+- [ ] Ingress / WAF rate limiting in addition to the in-process limiter.
+- [ ] Each customer: connectors tested (a real **Test connection**, not
+      assumed), readiness checks green, then LIVE mode.
+
+## Decide consciously (see Known Limitations)
+
+- [ ] **Automated response in LIVE mode.** The response gateway was not
+      re-reviewed in the MSSP hardening pass, and customer approval routing is
+      not enforced. Get an independent review, or restrict `action:execute`.
+- [ ] Single API replica: acceptable for your availability target?
+- [ ] No SSO/MFA: put an identity-aware proxy in front if required.
+- [ ] External LLMs: which tiers/customers may use hosted models? Configure
+      strategies, private-model-only and budgets per tenant.
+- [ ] Penetration test and load test before general availability.

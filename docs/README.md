@@ -2,7 +2,8 @@
 
 | Doc | What it covers |
 |-----|----------------|
-| [QUICKSTART](QUICKSTART.md) | Run the demo, log in, walk a scenario end-to-end |
+| [QUICKSTART](QUICKSTART.md) | Run the demo, log in, walk the MSSP and SOC workflows |
+| [MSSP](MSSP.md) | Tenant hierarchy, delegated access, tiers, SLAs, the managed-service console |
 | [ARCHITECTURE](ARCHITECTURE.md) | Services, data model, and the trust boundary |
 | [DATA_FLOW](DATA_FLOW.md) | Event → alert → incident → investigation → response |
 | [DATABASE](DATABASE.md) | Domain models, scoping, migrations |
@@ -13,7 +14,7 @@
 | [MULTI_LLM](MULTI_LLM.md) | Providers, capability routing, verification, budgets |
 | [AGENTS](AGENTS.md) | Specialist agents, tool broker, evidence-first output |
 | [SECURITY](SECURITY.md) | Threat model, prompt-injection defenses, action safety |
-| [RBAC](RBAC.md) | Roles, permissions, tenant isolation |
+| [RBAC](RBAC.md) | Permissions, provider/customer roles, grant rules, delegation |
 | [PLAYBOOKS](PLAYBOOKS.md) | Durable workflows and the response engine |
 | [DETECTION](DETECTION.md) | Detection engineering, Sigma, replay |
 | [DEPLOYMENT](DEPLOYMENT.md) | Profiles, environment variables, secrets |
@@ -23,5 +24,5 @@
 | [MONITORING](MONITORING.md) | Observability, health, metrics |
 | [TROUBLESHOOTING](TROUBLESHOOTING.md) | Common issues |
 | [TESTING_REPORT](TESTING_REPORT.md) | What was tested, results, coverage |
-| [KNOWN_LIMITATIONS](KNOWN_LIMITATIONS.md) | Honest scope: wired vs. scaffolded |
+| [KNOWN_LIMITATIONS](KNOWN_LIMITATIONS.md) | What is simplified or missing; read before production |
 | [PRODUCTION_READINESS](PRODUCTION_READINESS.md) | Checklist before going live |

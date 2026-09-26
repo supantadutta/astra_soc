@@ -9,14 +9,15 @@ never bypass a control.
 
 ```
                           ┌─────────────────────────────────────────────┐
-   Browser  ── HTTPS ──▶  │  Next.js (apps/web)                          │
-   (SSE)                  │  25 modules · ECharts · React Flow · PWA      │
+   Browser  ── HTTPS ──▶  │  Next.js 15 (apps/web)                       │
+   (SSE)                  │  MSSP console + SOC modules · ECharts · PWA  │
                           └───────────────┬─────────────────────────────┘
-                                          │  /api/* (rewrite) + /stream (SSE)
+                                          │  /api/* (runtime proxy or ingress) + SSE
                           ┌───────────────▼─────────────────────────────┐
                           │  FastAPI (apps/api)                          │
                           │  ┌────────────┬───────────┬───────────────┐  │
-                          │  │ Auth/RBAC  │ Mode       │ Audit (chain) │  │
+                          │  │ Auth/RBAC/ │ Per-tenant │ Keyed audit   │  │
+                          │  │ delegation │ mode, SLA  │ chain         │  │
                           │  ├────────────┴───────────┴───────────────┤  │
                           │  │ Domain: alerts, incidents, entities,   │  │
                           │  │ evidence, timeline, hypotheses         │  │

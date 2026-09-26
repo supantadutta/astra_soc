@@ -1,134 +1,113 @@
 # ASTRASOC
 
-**Autonomous Security Operations & Cognitive Response Platform**
+**Multi-tenant, AI-assisted security operations platform for MSSPs and in-house SOCs.**
 
-An AI-native Security Operations Center: a workflow-first, agent-assisted command
-center that ingests alerts, correlates them into incidents, investigates with
-multiple LLMs, and executes **governed** response through a policy + approval
-gateway — with backend-enforced DEMO/LIVE modes, RBAC, and a tamper-evident
-audit trail.
+One deployment runs a managed security service: the provider's SOC, resellers,
+and many isolated customers, with contractual SLAs, delegated analyst access,
+per-customer entitlements and usage metering. Inside each tenant, analysts get
+a real-time detection pipeline, an investigation workspace, bounded AI agents,
+durable playbooks and governed response.
 
-> **Design principle:** LLMs are *advisory*. They never replace deterministic
-> detections, policy decisions, authorization, or response execution. Every
-> trust-bearing control is enforced server-side and audited.
+> **Design principle:** models are advisory. Detection, authorization, tenant
+> isolation, policy, approvals and audit are deterministic and enforced by the
+> API. No model output can grant access or execute an action.
 
 ---
 
-## Quick start (DEMO mode — zero credentials)
+## Quick start (demo, zero credentials)
 
 ```bash
 docker compose -f docker-compose.demo.yml up --build
 ```
 
-- Web command center → <http://localhost:3000>
-- API + OpenAPI docs → <http://localhost:8000/api/docs>
+Open <http://localhost:3000>. Demo accounts are listed on the sign-in page
+(password `Demo!Pass123`). Try `soc@astrasoc.io` (MSSP SOC manager),
+`manager@acme.io` (customer SOC manager) and `ciso@acme.io` (customer admin).
+The walkthrough is in [docs/QUICKSTART.md](docs/QUICKSTART.md).
 
-Or run locally without Docker:
-
-```bash
-# Terminal 1 — API (Python 3.11+)
-cd apps/api && pip install -r requirements.txt && uvicorn astrasoc.main:app --port 8000
-
-# Terminal 2 — Web (Node 20+)
-cd apps/web && npm install && npm run dev
-```
-
-### Demo accounts (password `Demo!Pass123`)
-
-| Role | Email | Can do |
-|------|-------|--------|
-| Platform Super Admin | `admin@astrasoc.io` | Everything |
-| SOC Manager | `manager@acme.io` | Approvals, detection sign-off, RBAC, mode switch |
-| Incident Commander | `commander@acme.io` | Lead response, approve actions |
-| Tier-3 Analyst | `t3@acme.io` | Execute approved actions, write detections |
-| Tier-1 Analyst | `t1@acme.io` | Triage, acknowledge, promote alerts |
-| Auditor | `auditor@acme.io` | Read-only audit & oversight |
-| Read-only Executive | `exec@acme.io` | Dashboards & reports |
-
-The DEMO profile seeds **15 realistic attack scenarios**, generates live events
-continuously, and runs the full investigation → response workflow with a
-built-in **simulated reasoner** so everything works with no external LLM.
+For production see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). The API refuses to
+start with unsafe configuration and never creates demo accounts in production.
 
 ---
 
-## What's actually implemented
+## What you get
 
-This is a working platform, not a UI mock. Verified end-to-end (see
-[`docs/TESTING_REPORT.md`](docs/TESTING_REPORT.md)):
+**Managed service (MSSP)**, see [docs/MSSP.md](docs/MSSP.md)
+- Provider → reseller → customer hierarchy with tenant lifecycle (onboarding,
+  active, suspended, offboarding), contracts, data-residency regions, export
+  and confirmed offboarding.
+- Delegated access: provider-wide for SOC managers, time-boxed justified grants
+  per analyst, audited break-glass. Customers can switch provider access off.
+  Every delegated action lands in the customer's own audit trail.
+- Service tiers (Essentials / Professional / Enterprise) with API-enforced
+  feature entitlements and per-contract overrides.
+- SLA engine: per-severity acknowledgement and resolution clocks, background
+  breach detection, escalation to customer and provider, compliance reports.
+- Portfolio, unified cross-customer queue, content distribution of managed
+  detections, shift handover, usage metering with CSV export, monthly service
+  reports.
 
-- **Backend-enforced DEMO/LIVE modes** — mode is server state; data is scoped
-  (`DEMO`/`LIVE`) and never mixed; LIVE requires an admin, explicit confirmation,
-  and passing readiness checks.
-- **Deterministic detection + correlation** — alerts fuse into incidents with
-  entities, evidence, timeline, and a claim-evidence graph.
-- **Multi-LLM gateway** — capability-based routing across OpenAI / Azure /
-  Anthropic / Gemini / Bedrock / vLLM / Ollama / OpenAI-compatible, with **real
-  connectivity tests** (never fake success), circuit breakers, fallback, and
-  independent verification. A deterministic simulated reasoner keeps the platform
-  usable when every external provider is down.
-- **16 bounded specialist agents** + a coordinator workflow graph, a **tool
-  broker** with strict read-only/response separation, and **evidence-first**
-  JSON output (a claim without valid evidence can never trigger a response).
-- **Response gateway** — every production-changing action passes: schema →
-  evidence → confidence → asset criticality → blast radius → RBAC → policy (OPA-
-  compatible) → approval → dry-run → execute → verify → rollback → immutable
-  audit. Bound by short-lived action tokens.
-- **28 connectors** with real adapters, health checks, and a built-in mock
-  server; read/write permission separation.
-- **RBAC** (14 roles) enforced on every API route; tenant isolation.
-- **Prompt-injection & DLP defenses**, external-content labeling, secret masking.
-- **Controlled learning** pipeline (feedback → review → dataset → offline eval →
-  human approval); the platform never self-modifies production.
-- **Reporting** (12 report types) with evidence citations and fact/inference
-  separation; export to JSON/CSV/HTML/PDF.
-- **Tamper-evident audit log** (hash-chained, verifiable).
+**Security operations (per tenant)**
+- Ingestion API for log forwarders (normalises common Sysmon / Windows / ECS
+  fields) → deterministic detections with exceptions and threat-intel matching
+  → deduplicated alerts → correlated incidents.
+- Investigation workspace: timeline, evidence that keeps confirmed facts,
+  analyst conclusions and AI inferences apart, source-attested facts, entity
+  graph, hypotheses.
+- 16 bounded AI agents behind a model gateway with per-tenant AI policy,
+  residency, classification, private-model and budget guardrails, prompt-
+  injection wrapping, and verification of cited evidence. A built-in simulated
+  reasoner works without any external LLM.
+- Detection engineering with four-eyes approval, replay, versioning.
+- Durable playbooks with conditions and approval gates; governed response
+  actions with approvals ([limitations](docs/KNOWN_LIMITATIONS.md#response-and-automation)).
+- 28 connector definitions with truthful health checks and a mock server.
+- Real-time UI over server-sent events (short-lived stream tickets).
+- 13 report types; JSON / CSV / HTML / PDF export.
 
-See [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md) for an honest account
-of what is scaffolded vs. fully wired.
+**Platform security**, see [docs/SECURITY.md](docs/SECURITY.md)
+- Revocable server-side sessions, rotating refresh tokens with reuse
+  detection, lockout, password policy, scoped expiring API keys.
+- 56 permissions, 21 built-in roles, grant rules that prevent privilege
+  escalation, per-tenant DEMO/LIVE operating modes.
+- Keyed (HMAC) tamper-evident audit chain.
+- Secret references only (tenant-confined `vault://`, HashiCorp Vault
+  support); SSRF-safe egress policy.
+- Hardened containers, Helm chart, Kubernetes manifests, ArgoCD, CI.
 
----
+## Verified
+
+122 backend tests pass on SQLite and PostgreSQL 16; migrations match the
+models; lint, type-check and production build are clean; `npm audit` reports 0
+vulnerabilities; 27 Playwright end-to-end runs pass on desktop, tablet and phone;
+both images were built and the production stack was smoke-tested. Details and
+what was **not** tested: [docs/TESTING_REPORT.md](docs/TESTING_REPORT.md).
+
+Read [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md) before production
+use, especially on the single-replica API and the response gateway.
 
 ## Repository layout
 
 ```
-astrasoc/
-├── apps/
-│   ├── api/            FastAPI backend (models, auth, AI gateway, agents,
-│   │                   policy, response gateway, connectors, 105 endpoints)
-│   └── web/            Next.js command center (25 modules, ECharts, React Flow)
-├── infrastructure/     docker / kubernetes / helm / argocd
-├── docs/               Full documentation set
-├── docker-compose.demo.yml   Zero-dependency demo stack
-├── docker-compose.yml        Postgres + Redis dev/prod-like stack
-├── Makefile
-└── .env.example
+apps/api/            FastAPI backend (Python 3.11, SQLAlchemy 2, Alembic)
+apps/web/            Next.js 15 / React 19 console
+infrastructure/      helm/, kubernetes/, argocd/
+docs/                Documentation (index: docs/README.md)
+docker-compose.demo.yml   Demo stack (SQLite, simulated data)
+docker-compose.yml        Production-like stack (PostgreSQL)
+.github/workflows/   CI: lint, tests on SQLite and PostgreSQL, migrations, web build, images
 ```
 
 ## Common commands
 
 ```bash
-make demo          # docker demo stack
-make dev           # run API + web locally
-make test          # backend pytest + web typecheck
-make test-e2e      # Playwright end-to-end (servers must be running)
+make demo          # demo stack in Docker
+make dev           # API (:8000) + web (:3000) locally
+make test          # backend tests + web type-check
+make test-e2e      # Playwright (servers must be running)
 make build         # production build validation
-make demo-reset    # reset & reseed DEMO data (LIVE data untouched)
+make demo-reset    # reset demo data (LIVE data untouched)
 ```
-
-## Technology
-
-**Frontend:** Next.js 14, React 18, TypeScript, Tailwind, Apache ECharts,
-React Flow, Server-Sent Events, PWA.
-**Backend:** Python 3.11, FastAPI, Pydantic v2, SQLAlchemy 2, Alembic.
-**Datastores:** SQLite (demo) / PostgreSQL (prod), Redis (optional), and
-first-class integration points for ClickHouse, Neo4j, OpenSearch, Redpanda,
-Temporal, OPA, and Vault — reported honestly as "not configured" until wired.
-
-## Documentation
-
-Start with [`docs/QUICKSTART.md`](docs/QUICKSTART.md) and
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Full index in
-[`docs/README.md`](docs/README.md).
 
 ## License
 
