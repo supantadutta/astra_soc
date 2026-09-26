@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -15,7 +15,8 @@ from ..models import Connector, ConnectorCredentialReference, ConnectorHealth
 from ..schemas.common import serialize
 from ..services import audit
 from ..services.connectors.registry import get_adapter
-from ..services.secrets import secret_configured
+from ..services.egress import EgressError, validate_outbound_url
+from ..services.secrets import SecretRefError, secret_configured, validate_secret_ref
 
 router = APIRouter(prefix="/api/v1/connectors", tags=["connectors"])
 
@@ -53,34 +54,57 @@ def get_connector(connector_id: uuid.UUID,
     return _serialize_connector(db, c)
 
 
+_CRED_FIELDS = {"api_token", "api_key", "token", "client_id", "client_secret",
+                "username", "password"}
+_MUTABLE = ("name", "enabled", "base_url", "config", "can_read", "can_write",
+            "collection_interval_seconds", "rate_limit_per_minute", "use_mock")
+
+
 @router.patch("/{connector_id}")
-def update_connector(connector_id: uuid.UUID, payload: dict,
+def update_connector(connector_id: uuid.UUID, payload: dict = Body(...),
                      principal: Principal = Depends(require_permission("connector:manage")),
                      db: Session = Depends(get_db)) -> dict:
     c = db.get(Connector, connector_id)
     if not c or c.tenant_id != principal.tenant_id:
         raise HTTPException(404, detail="Connector not found")
-    for field in ("name", "enabled", "base_url", "config", "can_read", "can_write",
-                  "collection_interval_seconds", "rate_limit_per_minute", "use_mock"):
+    if payload.get("base_url"):
+        try:
+            payload["base_url"] = validate_outbound_url(payload["base_url"], resolve=False)
+        except EgressError as exc:
+            raise HTTPException(422, detail={"error": "egress_blocked", "message": str(exc)})
+    for field, lo, hi in (("collection_interval_seconds", 30, 86400), ("rate_limit_per_minute", 1, 6000)):
+        if field in payload and not lo <= int(payload[field]) <= hi:
+            raise HTTPException(422, detail=f"{field} must be between {lo} and {hi}")
+    refs = []
+    for ref in payload.get("credential_refs") or []:
+        field, sref = ref.get("field"), ref.get("secret_ref")
+        if not field or not sref:
+            continue
+        if field not in _CRED_FIELDS:
+            raise HTTPException(422, detail=f"credential field must be one of {sorted(_CRED_FIELDS)}")
+        try:
+            sref = validate_secret_ref(sref, tenant_slug=principal.tenant_slug,
+                                       platform_admin=principal.is_platform_admin)
+        except SecretRefError as exc:
+            raise HTTPException(422, detail={"error": "invalid_secret_ref", "message": str(exc)})
+        refs.append((field, sref))
+    for field in _MUTABLE:
         if field in payload:
             setattr(c, field, payload[field])
-    # Credential references (never the secret value itself).
-    if "credential_refs" in payload:
-        db.execute(select(ConnectorCredentialReference).where(
-            ConnectorCredentialReference.connector_id == c.id))
+    if refs:
         existing = {r.field: r for r in db.execute(select(ConnectorCredentialReference).where(
             ConnectorCredentialReference.connector_id == c.id)).scalars()}
-        for ref in payload["credential_refs"]:
-            field, sref = ref.get("field"), ref.get("secret_ref")
-            if not field or not sref:
-                continue
+        for field, sref in refs:
             if field in existing:
                 existing[field].secret_ref = sref
+                existing[field].last_rotated_at = datetime.now(UTC)
             else:
                 db.add(ConnectorCredentialReference(connector_id=c.id, field=field, secret_ref=sref))
     audit.record(db, action="connector.updated", actor_id=principal.user_id,
-                 tenant_id=principal.tenant_id, resource_type="connector",
-                 resource_id=str(connector_id), detail={"fields": list(payload)})
+                 actor_label=principal.label, tenant_id=principal.tenant_id,
+                 resource_type="connector", resource_id=str(connector_id),
+                 detail={"fields": sorted(set(payload) - {"credential_refs"}),
+                         "credential_fields": [f for f, _ in refs]})
     db.commit()
     return _serialize_connector(db, c)
 

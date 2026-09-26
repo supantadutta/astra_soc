@@ -1,81 +1,45 @@
 """Cross-tenant isolation is enforced by the backend, not the client.
 
-We provision a second tenant directly in the DB, log in as its manager through
-the real API, and prove that tenant cannot see or fetch the seeded tenant's
-incidents. Isolation is a tenant_id filter applied server-side on every query.
+Two peer customer tenants must never see each other's data, whatever IDs a
+caller supplies. (Delegated MSSP access is covered in test_mssp.py.)
 """
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import select
 
-from astrasoc.auth.security import hash_password
 from astrasoc.db import SessionLocal
-from astrasoc.models import Tenant, User, UserRole
-from astrasoc.seed.bootstrap import _ensure_permissions, _ensure_roles
+from astrasoc.models import Tenant
+from astrasoc.services.tenants import create_user, provision_tenant
 
-SECOND_EMAIL = "manager@globex.io"
-SECOND_PASSWORD = "Globex!Pass123"
+EMAIL = "manager@isolated.example"
+PASSWORD = "Isolated!Pass123"
 
 
 @pytest.fixture(scope="module")
-def second_tenant_manager():
-    """Create an isolated second tenant + manager user once for this module."""
-    db = SessionLocal()
-    try:
-        existing = db.execute(
-            select(Tenant).where(Tenant.slug == "globex")
-        ).scalar_one_or_none()
-        if existing is None:
-            tenant = Tenant(name="Globex Corporation", slug="globex", settings={})
-            db.add(tenant)
-            db.flush()
-            _ensure_permissions(db)
-            roles = _ensure_roles(db, tenant.id)
-            user = User(
-                tenant_id=tenant.id, email=SECOND_EMAIL,
-                full_name="Globex SOC Manager",
-                password_hash=hash_password(SECOND_PASSWORD),
-                attributes={"allowed_classifications": ["public", "internal"]},
-            )
-            db.add(user)
-            db.flush()
-            db.add(UserRole(user_id=user.id, role_id=roles["soc_manager"].id))
+def other_tenant(client):
+    with SessionLocal() as db:
+        if db.query(Tenant).filter(Tenant.slug == "isolated").first() is None:
+            t = provision_tenant(db, name="Isolated Co", slug="isolated", kind="customer")
+            create_user(db, t, email=EMAIL, full_name="Iso Manager", password=PASSWORD,
+                        roles=["soc_manager"])
             db.commit()
-    finally:
-        db.close()
-    return {"email": SECOND_EMAIL, "password": SECOND_PASSWORD}
-
-
-def _login(client, creds) -> dict:
-    r = client.post("/api/v1/auth/login", json=creds)
+    r = client.post("/api/v1/auth/login", json={"email": EMAIL, "password": PASSWORD})
     assert r.status_code == 200, r.text
     return {"Authorization": f"Bearer {r.json()['access_token']}"}
 
 
-def test_second_tenant_sees_none_of_first_tenants_incidents(
-    client, manager, second_tenant_manager
-):
-    # The seeded (acme) tenant has incidents.
-    acme_items = client.get("/api/v1/incidents", headers=manager).json()["items"]
-    assert len(acme_items) >= 1
-
-    # The freshly created (globex) tenant has its own, empty scope.
-    globex = _login(client, second_tenant_manager)
-    globex_items = client.get("/api/v1/incidents", headers=globex).json()["items"]
-    assert globex_items == []
+def test_other_tenant_sees_none_of_acmes_incidents(client, manager, other_tenant):
+    assert client.get("/api/v1/incidents", headers=manager).json()["total"] >= 1
+    assert client.get("/api/v1/incidents", headers=other_tenant).json()["items"] == []
 
 
-def test_second_tenant_cannot_fetch_first_tenants_incident_by_id(
-    client, manager, second_tenant_manager
-):
-    acme_items = client.get("/api/v1/incidents", headers=manager).json()["items"]
-    target_id = acme_items[0]["id"]
+def test_other_tenant_cannot_fetch_acme_incident_by_id(client, manager, other_tenant):
+    target = client.get("/api/v1/incidents", headers=manager).json()["items"][0]["id"]
+    assert client.get(f"/api/v1/incidents/{target}", headers=manager).status_code == 200
+    assert client.get(f"/api/v1/incidents/{target}", headers=other_tenant).status_code == 404
 
-    # Same id is directly reachable for its own tenant...
-    assert client.get(f"/api/v1/incidents/{target_id}", headers=manager).status_code == 200
 
-    # ...but a cross-tenant fetch is denied server-side (404, not leaked).
-    globex = _login(client, second_tenant_manager)
-    cross = client.get(f"/api/v1/incidents/{target_id}", headers=globex)
-    assert cross.status_code == 404
+def test_customer_cannot_switch_into_peer_tenant(client, other_tenant):
+    r = client.get("/api/v1/incidents", headers={**other_tenant, "X-Tenant-ID": "acme"})
+    assert r.status_code == 403
+    assert r.json()["error"] == "tenant_access_denied"

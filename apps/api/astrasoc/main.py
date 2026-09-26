@@ -22,23 +22,48 @@ logger = logging.getLogger("astrasoc")
 _background_tasks: set[asyncio.Task] = set()
 
 
+async def run_sla_sweeper(interval: float = 60.0) -> None:
+    """Record SLA breaches and escalate, once a minute."""
+    from .services.sla import sweep_breaches
+
+    def _tick() -> int:
+        with SessionLocal() as db:
+            n = sweep_breaches(db)
+            db.commit()
+            return n
+
+    while True:
+        try:
+            n = await asyncio.to_thread(_tick)
+            if n:
+                logger.info("SLA sweeper escalated %d incident(s)", n)
+        except Exception:  # noqa: BLE001 — log and keep the worker alive
+            logger.exception("SLA sweeper failed")
+        await asyncio.sleep(interval)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 1) Schema + baseline seed (idempotent).
     init_db()
     from .seed.bootstrap import ensure_seed
-    from .seed.engine import ensure_demo_data, run_live_generator
+    from .seed.engine import ensure_demo_estate_data, run_live_generator
 
     with SessionLocal() as db:
-        tenant = ensure_seed(db)
-        if settings.demo_seed_on_startup:
-            ensure_demo_data(db, tenant.id)
+        ensure_seed(db)
+        if settings.demo_seed_on_startup and settings.should_seed_demo_users:
+            ensure_demo_estate_data(db)
 
-    # 2) Continuous demo event generator (only produces DEMO-scoped data).
+    # 2) Background workers: SLA breach sweeper (always) and the continuous
+    #    demo event generator (only produces DEMO-scoped data).
     if settings.environment != "test":
-        task = asyncio.create_task(run_live_generator())
-        _background_tasks.add(task)
-        task.add_done_callback(_background_tasks.discard)
+        workers = [run_sla_sweeper()]
+        if settings.should_seed_demo_users:
+            workers.append(run_live_generator())
+        for coro in workers:
+            task = asyncio.create_task(coro)
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
 
     logger.info("ASTRASOC API ready (environment=%s, db=%s)",
                 settings.environment, "sqlite" if settings.is_sqlite else "postgres")
@@ -164,6 +189,8 @@ def register_routers() -> None:
         incidents,
         knowledge,
         models,
+        mssp,
+        notifications,
         playbooks,
         rbac,
         reports,
@@ -176,7 +203,7 @@ def register_routers() -> None:
     for module in (
         auth, system, dashboard, alerts, incidents, entities, agents, models,
         connectors, detections, threatintel, playbooks, response, knowledge,
-        reports, rbac, audit_log, evaluations, demo,
+        reports, rbac, audit_log, evaluations, demo, mssp, notifications,
     ):
         app.include_router(module.router)
 

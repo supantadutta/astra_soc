@@ -53,3 +53,49 @@ def auditor(client):
 @pytest.fixture
 def admin(client):
     return _login(client, "admin@astrasoc.io")
+
+
+def login(client, email: str, password: str = "Demo!Pass123") -> dict:
+    return _login(client, email, password)
+
+
+@pytest.fixture
+def t2(client):
+    return _login(client, "t2@acme.io")
+
+
+@pytest.fixture
+def t3(client):
+    return _login(client, "t3@acme.io")
+
+
+# --- MSSP personas --------------------------------------------------------
+@pytest.fixture
+def mssp_soc(client):
+    """Provider SOC manager: delegated access to every customer."""
+    return _login(client, "soc@astrasoc.io")
+
+
+@pytest.fixture
+def mssp_analyst(client):
+    """Provider analyst: only customers explicitly granted (acme, globex)."""
+    return _login(client, "analyst@astrasoc.io")
+
+
+@pytest.fixture
+def mssp_accounts(client):
+    return _login(client, "accounts@astrasoc.io")
+
+
+@pytest.fixture
+def acme_ciso(client):
+    return _login(client, "ciso@acme.io")
+
+
+@pytest.fixture
+def globex_admin(client):
+    return _login(client, "admin@globex.io")
+
+
+def as_tenant(headers: dict, tenant: str) -> dict:
+    return {**headers, "X-Tenant-ID": tenant}

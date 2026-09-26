@@ -21,6 +21,7 @@ import httpx
 
 from ...models import Connector
 from ...models.enums import HealthState
+from ..egress import EgressError, validate_outbound_url
 from ..secrets import resolve_secret, secret_configured
 
 
@@ -117,10 +118,18 @@ class ConnectorAdapter:
             return HealthResult(HealthState.UNHEALTHY.value, 0,
                                 "Circuit breaker open after repeated failures.", error="circuit_open")
         url = self.c.base_url.rstrip("/") + self.health_path
+        try:
+            validate_outbound_url(url, resolve=self._http is None)
+        except EgressError as exc:
+            return HealthResult(HealthState.UNHEALTHY.value, 0,
+                                f"Blocked by egress policy: {exc}", error="egress_blocked")
         start = time.perf_counter()
         try:
-            with httpx.Client(timeout=timeout) as client:
-                resp = client.get(url, headers=self._headers())
+            if self._http is not None:
+                resp = self._http.get(url, headers=self._headers())
+            else:
+                with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+                    resp = client.get(url, headers=self._headers())
             latency = int((time.perf_counter() - start) * 1000)
             ok = resp.status_code < 400
             self.breaker.record(ok)
@@ -155,10 +164,11 @@ class ConnectorAdapter:
         derived strictly from the transport — success is never assumed.
         """
         url = self.c.base_url.rstrip("/") + path
+        validate_outbound_url(url, resolve=self._http is None)  # raises EgressError
         client = self._http
         close = False
         if client is None:
-            client = httpx.Client(timeout=timeout)
+            client = httpx.Client(timeout=timeout, follow_redirects=False)
             close = True
         try:
             resp = client.post(url, json=payload, headers=self._headers())
@@ -217,6 +227,10 @@ class ConnectorAdapter:
                     "target": target, "status_code": status, "latency_ms": latency,
                     "reference_id": ref, "response": body, "live": True,
                     "summary": summary}
+        except EgressError as exc:
+            return {"success": False, "vendor": self.c.kind, "action": action_type,
+                    "target": target, "error": "egress_blocked", "live": True,
+                    "summary": f"[LIVE {self.c.kind}] {action_type} not sent — blocked by egress policy: {exc}"}
         except httpx.HTTPError as exc:
             self.breaker.record(False)
             return {"success": False, "vendor": self.c.kind, "action": action_type,

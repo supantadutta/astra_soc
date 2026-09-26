@@ -17,7 +17,9 @@ from ..models.enums import AlertStatus, IncidentStatus
 from ..schemas.common import serialize
 from ..services import audit
 from ..services.events import Event, bus
+from ..services.metering import record as record_usage
 from ..services.mode import current_scope
+from ..services.sla import apply_sla, mark_acknowledged
 
 router = APIRouter(prefix="/api/v1/alerts", tags=["alerts"])
 
@@ -80,9 +82,19 @@ def update_alert(alert_id: uuid.UUID, payload: dict,
     a = db.get(Alert, alert_id)
     if not a or a.tenant_id != principal.tenant_id or a.data_scope != scope:
         raise HTTPException(404, detail="Alert not found")
-    for field in ("status", "severity"):
+    allowed = {"status": {v.value for v in AlertStatus},
+               "severity": {"info", "low", "medium", "high", "critical"}}
+    changes = {}
+    for field, values in allowed.items():
         if field in payload:
+            if payload[field] not in values:
+                raise HTTPException(422, detail=f"{field} must be one of {sorted(values)}")
+            changes[field] = [getattr(a, field), payload[field]]
             setattr(a, field, payload[field])
+    audit.record(db, action="alert.updated", actor_id=principal.user_id,
+                 actor_label=principal.label, tenant_id=principal.tenant_id,
+                 resource_type="alert", resource_id=str(alert_id), data_scope=scope,
+                 detail={"changes": changes})
     db.commit()
     return serialize(a)
 
@@ -113,6 +125,9 @@ def promote_to_incident(alert_id: uuid.UUID,
     )
     db.add(inc)
     db.flush()
+    apply_sla(db, inc)
+    mark_acknowledged(inc)  # an analyst promoting the alert has acknowledged it
+    record_usage(db, principal.tenant_id, "incidents")
     a.incident_id = inc.id
     a.status = AlertStatus.INVESTIGATING.value
     db.add(IncidentAlert(incident_id=inc.id, alert_id=a.id,

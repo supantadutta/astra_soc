@@ -23,7 +23,7 @@ from ..auth.security import (
 )
 from ..config import settings
 from ..db import get_db
-from ..models import APIKey, User
+from ..models import APIKey, Tenant, User
 from ..models import Session as SessionModel
 from ..schemas.auth import (
     APIKeyCreate,
@@ -90,7 +90,8 @@ def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)) -
         )
         db.commit()
         raise _invalid()
-    if not user.is_active:
+    tenant = db.get(Tenant, user.tenant_id)
+    if not user.is_active or tenant is None or not tenant.is_active:
         raise _invalid()
 
     user.failed_login_count = 0
@@ -126,8 +127,9 @@ def refresh(body: RefreshRequest, request: Request, db: Session = Depends(get_db
     if sess.revoked_at is not None or sess.expires_at < now:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired refresh token")
     user = db.get(User, sess.user_id)
-    if user is None or not user.is_active:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="User inactive")
+    tenant = db.get(Tenant, user.tenant_id) if user else None
+    if user is None or not user.is_active or tenant is None or not tenant.is_active:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="User or tenant inactive")
 
     new_refresh, _ = create_refresh_token({"sub": str(user.id), "sid": sess.sid})
     sess.previous_token_hash = sess.refresh_token_hash

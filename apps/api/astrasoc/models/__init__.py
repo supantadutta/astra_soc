@@ -17,6 +17,7 @@ from .detection import DetectionRule, ThreatIndicator
 from .identity import APIKey, Permission, Role, Session, Tenant, User, UserRole
 from .knowledge import KnowledgeChunk, KnowledgeDocument
 from .learning import AnalystFeedback, EvaluationDataset, EvaluationRun
+from .mssp import ShiftHandover, TenantAccessGrant, UsageCounter
 from .platform import AuditEvent, Notification, Report, SystemSetting
 from .response import (
     ApprovalRequest,
@@ -51,4 +52,5 @@ __all__ = [
     "DetectionRule", "ThreatIndicator",
     "AnalystFeedback", "EvaluationDataset", "EvaluationRun",
     "Report", "AuditEvent", "Notification", "SystemSetting",
+    "TenantAccessGrant", "UsageCounter", "ShiftHandover",
 ]

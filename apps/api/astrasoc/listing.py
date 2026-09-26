@@ -47,10 +47,12 @@ def paginate(
 
     total = db.execute(count_stmt).scalar() or 0
 
-    sort_col = getattr(model, sort, None) if sort else None
+    # Only real, non-sensitive columns are sortable (never an arbitrary attribute).
+    columns = {c.name for c in model.__table__.columns} - {"password_hash", "key_hash"}
+    sort_col = getattr(model, sort) if sort in columns else None
     if sort_col is None:
         sort_col = getattr(model, "created_at", None) or model.id
-    stmt = stmt.order_by(asc(sort_col) if order == "asc" else desc(sort_col))
+    stmt = stmt.order_by(asc(sort_col) if order == "asc" else desc(sort_col), desc(model.id))
     stmt = stmt.offset((page - 1) * page_size).limit(page_size)
 
     rows = db.execute(stmt).scalars().all()

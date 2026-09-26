@@ -14,9 +14,34 @@ from ..db import get_db
 from ..models import ModelDeployment, ModelProvider, ModelRoute
 from ..models.enums import ProviderKind
 from ..schemas.common import serialize, serialize_many
+from ..seed.catalog import CAPABILITIES
 from ..services import audit
+from ..services.egress import EgressError, validate_outbound_url
 from ..services.model_gateway.providers import test_connectivity
-from ..services.secrets import secret_configured
+from ..services.secrets import SecretRefError, secret_configured, validate_secret_ref
+
+CLASSIFICATIONS = ("public", "internal", "confidential", "restricted")
+
+
+def _validate_provider_fields(principal: Principal, payload: dict) -> None:
+    if payload.get("base_url"):
+        try:
+            payload["base_url"] = validate_outbound_url(payload["base_url"], resolve=False)
+        except EgressError as exc:
+            raise HTTPException(422, detail={"error": "egress_blocked", "message": str(exc)})
+    if payload.get("secret_ref"):
+        try:
+            payload["secret_ref"] = validate_secret_ref(
+                payload["secret_ref"], tenant_slug=principal.tenant_slug,
+                platform_admin=principal.is_platform_admin)
+        except SecretRefError as exc:
+            raise HTTPException(422, detail={"error": "invalid_secret_ref", "message": str(exc)})
+    dca = payload.get("data_classification_allowance")
+    if dca is not None and dca not in CLASSIFICATIONS:
+        raise HTTPException(422, detail=f"data_classification_allowance must be one of {CLASSIFICATIONS}")
+    for field in ("daily_token_limit", "timeout_seconds", "rate_limit_per_minute"):
+        if field in payload and int(payload[field]) < 0:
+            raise HTTPException(422, detail=f"{field} must be >= 0")
 
 router = APIRouter(prefix="/api/v1/models", tags=["models"])
 
@@ -42,14 +67,16 @@ def create_provider(payload: dict,
                     principal: Principal = Depends(require_permission("model:manage")),
                     db: Session = Depends(get_db)) -> dict:
     kind = payload.get("kind")
-    if kind not in [k.value for k in ProviderKind]:
+    if kind not in [k.value for k in ProviderKind] or kind == ProviderKind.SIMULATED.value:
         raise HTTPException(422, detail="Invalid provider kind")
+    _validate_provider_fields(principal, payload)
     p = ModelProvider(
         tenant_id=principal.tenant_id, name=payload.get("name", kind), kind=kind,
         enabled=payload.get("enabled", True), base_url=payload.get("base_url"),
         region=payload.get("region"), secret_ref=payload.get("secret_ref"),
         data_classification_allowance=payload.get("data_classification_allowance", "internal"),
         private_only=payload.get("private_only", False),
+        allowed_geographies=list(payload.get("allowed_geographies") or []),
         daily_token_limit=payload.get("daily_token_limit", 0),
         timeout_seconds=payload.get("timeout_seconds", 60),
         fallback_priority=payload.get("fallback_priority", 100),
@@ -76,7 +103,9 @@ def update_provider(provider_id: uuid.UUID, payload: dict,
     p = db.get(ModelProvider, provider_id)
     if not p or p.tenant_id != principal.tenant_id:
         raise HTTPException(404, detail="Provider not found")
+    _validate_provider_fields(principal, payload)
     for field in ("name", "enabled", "base_url", "region", "secret_ref", "private_only",
+                  "allowed_geographies",
                   "daily_token_limit", "monthly_cost_limit_usd", "timeout_seconds",
                   "fallback_priority", "data_classification_allowance", "rate_limit_per_minute"):
         if field in payload:
@@ -90,7 +119,7 @@ def update_provider(provider_id: uuid.UUID, payload: dict,
 
 @router.post("/providers/{provider_id}/test")
 def test_provider(provider_id: uuid.UUID,
-                  principal: Principal = Depends(require_permission("model:read")),
+                  principal: Principal = Depends(require_permission("model:manage")),
                   db: Session = Depends(get_db)) -> dict:
     """Perform a REAL connectivity test. Never reports success without a
     confirming response from the provider."""
@@ -130,10 +159,24 @@ def upsert_route(capability: str, payload: dict,
     if route is None:
         route = ModelRoute(tenant_id=principal.tenant_id, capability=capability)
         db.add(route)
+    if capability not in CAPABILITIES:
+        raise HTTPException(422, detail=f"capability must be one of {CAPABILITIES}")
     for field in ("primary_deployment_id", "fallback_deployment_id", "verifier_deployment_id",
                   "shadow_deployment_id"):
-        if field in payload and payload[field]:
-            setattr(route, field, uuid.UUID(payload[field]))
+        if field in payload:
+            if not payload[field]:
+                setattr(route, field, None)
+                continue
+            try:
+                dep = db.get(ModelDeployment, uuid.UUID(str(payload[field])))
+            except ValueError:
+                dep = None
+            prov = db.get(ModelProvider, dep.provider_id) if dep else None
+            # A route may only use this tenant's own deployments (and thus its
+            # own credentials) — never another tenant's.
+            if prov is None or prov.tenant_id != principal.tenant_id:
+                raise HTTPException(422, detail=f"{field} is not a deployment of this tenant")
+            setattr(route, field, dep.id)
     if "require_verification" in payload:
         route.require_verification = payload["require_verification"]
     if "enabled" in payload:

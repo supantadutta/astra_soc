@@ -48,11 +48,20 @@ def create_document(payload: dict,
     scope = payload.get("scope", "tenant_knowledge")
     if scope not in MEMORY_SCOPES:
         raise HTTPException(422, detail="Invalid memory scope")
+    if scope == "global_knowledge" and not principal.is_platform_admin:
+        raise HTTPException(403, detail="Only the platform operator can publish global knowledge.")
+    if not str(payload.get("title", "")).strip():
+        raise HTTPException(422, detail="title is required")
+    classification = payload.get("classification", "internal")
+    if classification not in principal.allowed_classifications:
+        raise HTTPException(403, detail="You cannot store content above your classification clearance.")
     doc = knowledge.ingest_document(
-        db, principal.tenant_id, title=payload["title"], body=payload.get("body", ""),
-        scope=scope, classification=payload.get("classification", "internal"),
+        db, principal.tenant_id, title=str(payload["title"]).strip()[:300], body=payload.get("body", ""),
+        scope=scope, classification=classification,
         source=payload.get("source", ""), author=principal.email,
-        is_global=payload.get("is_global", False) and principal.has("settings:manage"),
+        # Global knowledge is visible to every tenant, so only the platform
+        # operator may publish it.
+        is_global=bool(payload.get("is_global")) and principal.is_platform_admin,
     )
     audit.record(db, action="knowledge.ingested", actor_id=principal.user_id,
                  tenant_id=principal.tenant_id, resource_type="knowledge_document",
@@ -69,7 +78,7 @@ def search(payload: dict,
         db, principal.tenant_id, payload.get("query", ""),
         scopes=payload.get("scopes"),
         allowed_classifications=principal.allowed_classifications,
-        limit=payload.get("limit", 8),
+        limit=max(1, min(int(payload.get("limit", 8)), 50)),
     )
     return {"results": results}
 

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import httpx
 
 from ...models.enums import HealthState, ProviderKind
+from ..egress import EgressError, validate_outbound_url
 from ..secrets import resolve_secret, secret_configured
 
 
@@ -91,11 +92,16 @@ def test_connectivity(
             "No base URL configured for this provider.", error="missing_base_url",
         )
 
+    try:
+        validate_outbound_url(url)
+    except EgressError as exc:
+        return ProviderTestResult(HealthState.UNHEALTHY.value, 0,
+                                  f"Blocked by egress policy: {exc}", error="egress_blocked")
     secret = resolve_secret(secret_ref)
     headers = _headers_for(kind, secret)
     start = time.perf_counter()
     try:
-        with httpx.Client(timeout=timeout) as client:
+        with httpx.Client(timeout=timeout, follow_redirects=False) as client:
             resp = client.get(url, headers=headers)
         latency = int((time.perf_counter() - start) * 1000)
         if resp.status_code in (200, 201):
@@ -150,13 +156,14 @@ def chat_completion(
     can fail over. Returns (text, usage)."""
     secret = resolve_secret(secret_ref)
     base = (base_url or _default_base(kind) or "").rstrip("/")
+    validate_outbound_url(base or "")  # raises EgressError -> gateway fails over
     if kind == ProviderKind.ANTHROPIC.value:
         url = f"{base}/v1/messages"
         payload = {"model": model, "max_tokens": 1500, "system": system,
                    "messages": [{"role": "user", "content": user}]}
         headers = {"x-api-key": secret or "", "anthropic-version": "2023-06-01",
                    "content-type": "application/json"}
-        with httpx.Client(timeout=timeout) as client:
+        with httpx.Client(timeout=timeout, follow_redirects=False) as client:
             resp = client.post(url, json=payload, headers=headers)
         resp.raise_for_status()
         data = resp.json()
@@ -173,7 +180,7 @@ def chat_completion(
     payload = {"model": model, "messages": [
         {"role": "system", "content": system}, {"role": "user", "content": user}]}
     headers = _headers_for(kind, secret) | {"content-type": "application/json"}
-    with httpx.Client(timeout=timeout) as client:
+    with httpx.Client(timeout=timeout, follow_redirects=False) as client:
         resp = client.post(url, json=payload, headers=headers)
     resp.raise_for_status()
     data = resp.json()

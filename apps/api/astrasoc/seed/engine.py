@@ -61,18 +61,28 @@ def _next_incident_key(db: Session, tenant_id: uuid.UUID) -> str:
 def build_scenario(db: Session, tenant_id: uuid.UUID, defn: dict, scope: str = DEMO) -> Incident:
     """Create a full incident (entities, alerts, evidence, timeline, hypotheses)."""
     now = datetime.now(UTC)
+    # Realistic history: the case opened some time ago; most were
+    # acknowledged within minutes, a few were not (so SLA tracking has real
+    # breaches and at-risk cases to show — nothing is faked downstream).
+    opened = now - timedelta(minutes=random.randint(8, 600))
+    acked = opened + timedelta(minutes=random.randint(2, 45)) if random.random() < 0.75 else None
     inc = Incident(
         tenant_id=tenant_id, data_scope=scope, key=_next_incident_key(db, tenant_id),
         title=defn["title"], summary=defn["summary"], severity=defn["severity"],
-        status=IncidentStatus.INVESTIGATING.value, confidence=defn["confidence"],
+        status=(IncidentStatus.INVESTIGATING.value if acked else IncidentStatus.NEW.value),
+        confidence=defn["confidence"],
         business_risk=defn["business_risk"], risk_score=defn["business_risk"],
         scenario_key=defn["key"], attack_tactics=defn["attack_tactics"],
         attack_techniques=defn["attack_techniques"],
-        sla_ack_due=now + timedelta(minutes=15), sla_resolve_due=now + timedelta(hours=8),
-        acknowledged_at=now - timedelta(minutes=random.randint(1, 8)),
+        created_at=opened, acknowledged_at=acked if acked and acked < now else None,
     )
     db.add(inc)
     db.flush()
+    from ..services.metering import record
+    from ..services.sla import apply_sla
+
+    apply_sla(db, inc)
+    record(db, tenant_id, "incidents")
 
     # Entities.
     entity_rows: list[Entity] = []
@@ -214,7 +224,7 @@ def _seed_threat_intel(db: Session, tenant_id: uuid.UUID, scope: str = DEMO) -> 
             ))
 
 
-def ensure_demo_data(db: Session, tenant_id: uuid.UUID) -> None:
+def ensure_demo_data(db: Session, tenant_id: uuid.UUID, limit: int | None = None) -> None:
     """Idempotently build the seeded scenarios and TI if not already present."""
     existing = db.execute(
         select(func.count()).select_from(Incident).where(
@@ -222,9 +232,19 @@ def ensure_demo_data(db: Session, tenant_id: uuid.UUID) -> None:
     ).scalar() or 0
     _seed_threat_intel(db, tenant_id)
     if existing == 0:
-        for defn in SCENARIOS:
+        for defn in SCENARIOS[:limit] if limit is not None else SCENARIOS:
             build_scenario(db, tenant_id, defn, DEMO)
     db.commit()
+
+
+def ensure_demo_estate_data(db: Session) -> None:
+    """Seed demo incidents for every demo customer tenant."""
+    from .bootstrap import demo_customer_scenarios
+
+    for slug, count in demo_customer_scenarios().items():
+        tenant = db.execute(select(Tenant).where(Tenant.slug == slug)).scalar_one_or_none()
+        if tenant is not None and count:
+            ensure_demo_data(db, tenant.id, limit=count)
 
 
 def reset_demo(db: Session, tenant_id: uuid.UUID) -> dict:

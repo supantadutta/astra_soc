@@ -63,6 +63,15 @@ PERMISSIONS: dict[str, str] = {
     "mode:manage": "Switch demo/live operating mode",
     "demo:manage": "Control demo scenarios and reseed",
     "health:read": "View platform health and observability",
+    "notification:read": "Read own / tenant notifications",
+    # MSSP (only effective in provider / reseller tenants)
+    "mssp:portfolio": "View the customer portfolio, unified queue and SLA dashboards",
+    "mssp:all_customers": "Delegated access to every descendant customer tenant",
+    "mssp:onboard": "Onboard, update, suspend and offboard customer tenants",
+    "mssp:grants": "Grant / revoke provider staff access to customer tenants",
+    "mssp:billing": "View usage metering and billing exports",
+    "mssp:content": "Distribute managed detection content to customers",
+    "mssp:handover": "Write and acknowledge SOC shift handovers",
 }
 
 WILDCARD = "*"
@@ -71,7 +80,7 @@ WILDCARD = "*"
 # Each maps to a permission list. These are seeded per tenant plus a set of
 # global templates.
 READ_ANALYST = [
-    "alert:read", "incident:read", "evidence:read", "entity:read", "agent:read",
+    "notification:read", "alert:read", "incident:read", "evidence:read", "entity:read", "agent:read",
     "model:read", "tool:read", "query:run", "knowledge:read", "detection:read",
     "threatintel:read", "playbook:read", "approval:read", "policy:read",
     "report:read", "connector:read", "health:read",
@@ -88,10 +97,13 @@ TIER3 = TIER2 + ["detection:write", "playbook:write", "action:execute", "evidenc
 
 # Permissions that act across tenants. Only platform administrators hold them.
 PLATFORM_PERMISSIONS = {"platform:admin"}
+# Provider-level permissions: meaningful only in provider / reseller tenants.
+PROVIDER_PERMISSIONS = {p for p in PERMISSIONS if p.startswith("mssp:")}
 
 BUILTIN_ROLES: dict[str, list[str]] = {
     "platform_super_admin": [WILDCARD],
-    "tenant_admin": [p for p in PERMISSIONS if p not in PLATFORM_PERMISSIONS],
+    "tenant_admin": [p for p in PERMISSIONS
+                     if p not in PLATFORM_PERMISSIONS and p not in PROVIDER_PERMISSIONS],
     "soc_manager": TIER3 + [
         "approval:decide", "detection:approve", "policy:read", "rbac:manage",
         "demo:manage", "evaluation:manage", "connector:manage", "mode:manage",
@@ -106,12 +118,12 @@ BUILTIN_ROLES: dict[str, list[str]] = {
     ],
     "threat_intel_analyst": READ_ANALYST + ["threatintel:write", "knowledge:write"],
     "auditor": [
-        "audit:read", "incident:read", "alert:read", "evidence:read",
+        "notification:read", "audit:read", "incident:read", "alert:read", "evidence:read",
         "policy:read", "approval:read", "report:read", "health:read",
         "connector:read", "model:read", "detection:read",
     ],
     "readonly_executive": [
-        "incident:read", "report:read", "report:generate", "health:read",
+        "notification:read", "incident:read", "report:read", "report:generate", "health:read",
     ],
     "integration_service_account": [
         "alert:read", "alert:write", "incident:read", "incident:write",
@@ -120,6 +132,31 @@ BUILTIN_ROLES: dict[str, list[str]] = {
     "automation_service_account": [
         "incident:read", "agent:run", "action:request", "playbook:read", "playbook:run",
         "query:run", "report:generate",
+    ],
+}
+
+# --- MSSP provider roles (seeded in provider / reseller tenants) ------------
+PROVIDER_ROLES: dict[str, list[str]] = {
+    "provider_admin": sorted(set(BUILTIN_ROLES["tenant_admin"]) | PROVIDER_PERMISSIONS),
+    "mssp_soc_manager": sorted(set(BUILTIN_ROLES["soc_manager"]) | PROVIDER_PERMISSIONS),
+    "mssp_analyst": sorted(set(TIER2) | {"mssp:portfolio", "mssp:handover"}),
+    "mssp_account_manager": [
+        "notification:read", "incident:read", "report:read", "report:generate",
+        "health:read", "connector:read", "mssp:portfolio", "mssp:onboard", "mssp:billing",
+    ],
+}
+
+# --- Customer-portal roles (seeded in customer tenants) --------------------
+CUSTOMER_VIEWER = [
+    "notification:read", "incident:read", "alert:read", "evidence:read", "entity:read",
+    "report:read", "approval:read", "health:read", "policy:read", "detection:read",
+]
+CUSTOMER_ROLES: dict[str, list[str]] = {
+    "customer_viewer": CUSTOMER_VIEWER,
+    "customer_approver": CUSTOMER_VIEWER + ["approval:decide", "feedback:write"],
+    "customer_admin": CUSTOMER_VIEWER + [
+        "approval:decide", "feedback:write", "report:generate", "connector:read",
+        "audit:read", "user:manage", "rbac:manage", "tenant:manage",
     ],
 }
 
@@ -138,7 +175,26 @@ ROLE_DESCRIPTIONS = {
     "readonly_executive": "Executive dashboards and reports only.",
     "integration_service_account": "Machine identity for ingestion connectors.",
     "automation_service_account": "Machine identity for automation/playbooks.",
+    "provider_admin": "Administers an MSSP / reseller tenant and its customer portfolio.",
+    "mssp_soc_manager": "Runs the managed SOC across every customer in the portfolio.",
+    "mssp_analyst": "Provider analyst; works customers they are explicitly granted.",
+    "mssp_account_manager": "Customer onboarding, SLAs, usage and service reporting.",
+    "customer_viewer": "Customer stakeholder: dashboards, incidents and reports (read-only).",
+    "customer_approver": "Customer stakeholder who approves response actions on their assets.",
+    "customer_admin": "Customer administrator: users, approvals, branding and contacts.",
 }
+
+
+def roles_for_tenant_kind(kind: str, *, platform_root: bool = False) -> dict[str, list[str]]:
+    """Role catalogue appropriate for a tenant of the given kind."""
+    roles = {k: v for k, v in BUILTIN_ROLES.items() if k not in PLATFORM_ONLY_ROLES}
+    if platform_root:
+        roles["platform_super_admin"] = BUILTIN_ROLES["platform_super_admin"]
+    if kind in ("provider", "reseller"):
+        roles.update(PROVIDER_ROLES)
+    else:
+        roles.update(CUSTOMER_ROLES)
+    return roles
 
 
 # Roles that only exist in the platform (operator) tenant.
@@ -149,6 +205,7 @@ APPROVAL_AUTHORITY: dict[str, set[str]] = {
     "incident_commander": {"incident_commander", "soc_manager", "tenant_admin"},
     "soc_manager": {"soc_manager", "tenant_admin"},
     "tenant_admin": {"tenant_admin"},
+    "customer_approver": {"customer_approver", "customer_admin"},
 }
 
 

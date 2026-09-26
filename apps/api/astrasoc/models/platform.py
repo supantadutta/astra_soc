@@ -64,6 +64,15 @@ class Notification(UUIDMixin, TenantMixin, TimestampMixin, Base):
     link: Mapped[str | None] = mapped_column(String(300), nullable=True)
     read_at: Mapped[datetime | None] = mapped_column(nullable=True)
     data_scope: Mapped[str] = mapped_column(String(8), default="DEMO")
+    # Out-of-band delivery (email/chat/webhook) — recorded truthfully:
+    # not_requested | not_configured | simulated | sent | failed
+    channel: Mapped[str] = mapped_column(String(20), default="in_app")
+    recipient: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    delivery_status: Mapped[str] = mapped_column(String(20), default="not_requested")
+    delivery_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Which tenant the event concerns (differs from tenant_id when a provider
+    # is notified about a customer).
+    subject_tenant_id: Mapped[uuid.UUID | None] = mapped_column(GUID, nullable=True, index=True)
 
 
 class SystemSetting(UUIDMixin, TimestampMixin, Base):

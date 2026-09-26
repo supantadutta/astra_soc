@@ -77,6 +77,9 @@ class Settings(BaseSettings):
     trusted_proxies: str = ""
 
     # --- Bootstrap / seeding ---------------------------------------------
+    # The root provider tenant (the MSSP operating the platform).
+    platform_tenant_name: str = "ASTRASOC Managed Security"
+    platform_tenant_slug: str = "astrasoc"
     # Demo accounts (well-known password) are created only when this is true.
     # Default: on for demo/development/test, OFF for production.
     seed_demo_users: bool | None = None

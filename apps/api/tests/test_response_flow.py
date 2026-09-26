@@ -57,10 +57,21 @@ def test_action_without_confirmed_fact_rejected(client, manager):
 
 
 def test_alert_promotes_to_incident(client, manager):
-    alerts = client.get("/api/v1/alerts?status=new", headers=manager).json()["items"]
-    new = next((a for a in alerts if not a["incident_id"]), None)
-    if new is None:
-        return  # no free alert this run; skip silently
-    r = client.post(f"/api/v1/alerts/{new['id']}/promote", headers=manager)
+    """A standalone alert becomes an incident with SLA targets applied."""
+    from astrasoc.db import SessionLocal
+    from astrasoc.models import Alert, Tenant
+
+    with SessionLocal() as db:
+        acme = db.query(Tenant).filter(Tenant.slug == "acme").one()
+        alert = Alert(tenant_id=acme.id, data_scope="DEMO", title="Test standalone alert",
+                      source="test", severity="high", status="new",
+                      observables={"host": "TEST-HOST-1"})
+        db.add(alert)
+        db.commit()
+        alert_id = str(alert.id)
+    r = client.post(f"/api/v1/alerts/{alert_id}/promote", headers=manager)
     assert r.status_code == 200
-    assert r.json()["key"].startswith("INC-")
+    inc = r.json()
+    assert inc["key"].startswith("INC-")
+    assert inc["sla_ack_due"] and inc["sla_resolve_due"] and inc["acknowledged_at"]
+    assert client.post(f"/api/v1/alerts/{alert_id}/promote", headers=manager).status_code == 400

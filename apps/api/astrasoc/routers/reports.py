@@ -18,15 +18,15 @@ from ..models import Report
 from ..schemas.common import serialize
 from ..services import audit
 from ..services.mode import current_scope
-from ..services.reporting import export_html, export_pdf_like, generate_report
+from ..services.reporting import (
+    REPORT_TYPES,
+    ReportError,
+    export_html,
+    export_pdf_like,
+    generate_report,
+)
 
 router = APIRouter(prefix="/api/v1/reports", tags=["reports"])
-
-REPORT_TYPES = [
-    "incident", "executive_summary", "technical_investigation", "root_cause",
-    "response_action", "timeline", "attack_coverage", "analyst_performance",
-    "automation_performance", "llm_usage", "integration_health", "compliance_audit",
-]
 
 
 @router.get("/types")
@@ -53,9 +53,17 @@ def create_report(payload: dict,
     if report_type not in REPORT_TYPES:
         raise HTTPException(422, detail="Invalid report type")
     scope = current_scope(db, principal.tenant_id)
-    incident_id = uuid.UUID(payload["incident_id"]) if payload.get("incident_id") else None
-    report = generate_report(db, principal.tenant_id, report_type, scope,
-                             incident_id=incident_id, generated_by=principal.user_id)
+    try:
+        incident_id = uuid.UUID(payload["incident_id"]) if payload.get("incident_id") else None
+    except ValueError:
+        raise HTTPException(422, detail="incident_id must be a UUID")
+    params = {"period": payload["period"]} if payload.get("period") else {}
+    try:
+        report = generate_report(db, principal.tenant_id, report_type, scope,
+                                 incident_id=incident_id, generated_by=principal.user_id,
+                                 parameters=params)
+    except ReportError as exc:
+        raise HTTPException(404 if "not found" in str(exc) else 422, detail=str(exc))
     audit.record(db, action="report.generated", actor_id=principal.user_id,
                  tenant_id=principal.tenant_id, resource_type="report",
                  resource_id=str(report.id), data_scope=scope, detail={"type": report_type})
@@ -85,7 +93,13 @@ def export(report_id: uuid.UUID, format: str = Query("json", pattern="^(json|csv
                         media_type="application/json",
                         headers={"content-disposition": f"attachment; filename=report-{r.id}.json"})
     if format == "html":
-        return PlainTextResponse(export_html(r), media_type="text/html")
+        from ..models import Tenant
+
+        t = db.get(Tenant, r.tenant_id)
+        return PlainTextResponse(
+            export_html(r, (t.branding or {}) if t else {}), media_type="text/html",
+            headers={"content-disposition": f"attachment; filename=report-{r.id}.html",
+                     "x-content-type-options": "nosniff"})
     if format == "pdf":
         # Dependency-free printable document (PDF-like). Documented as such.
         return Response(content=export_pdf_like(r), media_type="application/pdf",

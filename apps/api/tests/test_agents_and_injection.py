@@ -1,4 +1,6 @@
 """Agent workflows, tool broker separation, and prompt-injection defenses."""
+import pytest
+
 from astrasoc.services.injection import detect_injection, screen_external_content, wrap_external
 from astrasoc.services.tool_broker.broker import ToolBrokerError, broker
 
@@ -39,14 +41,13 @@ def test_external_content_wrapped_as_untrusted():
 
 def test_tool_broker_blocks_response_tools(client, manager):
     # A response-scoped tool must never execute via the broker.
+    from sqlalchemy import select
+
     from astrasoc.db import SessionLocal
     from astrasoc.models import Tenant
-    from sqlalchemy import select
 
     with SessionLocal() as db:
         tenant = db.execute(select(Tenant)).scalars().first()
-        try:
+        with pytest.raises(ToolBrokerError) as exc:
             broker.execute(db, tenant.id, "isolate_endpoint", {}, scope="DEMO")
-            assert False, "response tool should be blocked"
-        except ToolBrokerError as exc:
-            assert exc.code == "response_tool_blocked"
+        assert exc.value.code == "response_tool_blocked"

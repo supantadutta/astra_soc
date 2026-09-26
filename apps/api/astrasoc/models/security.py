@@ -99,6 +99,10 @@ class Incident(UUIDMixin, TenantMixin, ScopeMixin, TimestampMixin, Base):
     investigated_at: Mapped[datetime | None] = mapped_column(nullable=True)
     responded_at: Mapped[datetime | None] = mapped_column(nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    # SLA breach bookkeeping (set once by the SLA sweeper; drives escalation).
+    sla_ack_breached_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    sla_resolve_breached_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    escalation_level: Mapped[int] = mapped_column(Integer, default=0)
     # ATT&CK coverage and denormalized entity summary.
     attack_tactics: Mapped[list] = mapped_column(default=list)
     attack_techniques: Mapped[list] = mapped_column(default=list)

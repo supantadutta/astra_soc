@@ -78,8 +78,46 @@ def get_current_principal(
     db: Session = Depends(get_db),
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
 ) -> Principal:
-    """Resolve the caller from a Bearer JWT or an API key."""
+    """Resolve the caller from a Bearer JWT or an API key, then apply MSSP
+    tenant-context switching when ``X-Tenant-ID`` names another tenant."""
+    principal, user = _authenticate(db, authorization, x_api_key)
+    principal.home_tenant_id = principal.tenant_id
+    principal.home_tenant_slug = principal.tenant_slug
+    principal.home_permissions = list(principal.permissions)
+    if x_tenant_id and x_tenant_id not in (str(principal.tenant_id), principal.tenant_slug):
+        _enter_tenant(db, principal, user, x_tenant_id)
+    request.state.principal = principal
+    return principal
+
+
+def _enter_tenant(db: Session, principal: Principal, user: User, ref: str) -> None:
+    from ..services.tenancy import TenantAccessDenied, resolve_access
+
+    target = None
+    try:
+        target = db.get(Tenant, uuid.UUID(ref))
+    except ValueError:
+        target = db.execute(select(Tenant).where(Tenant.slug == ref)).scalar_one_or_none()
+    if target is None:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail={
+            "error": "tenant_access_denied", "message": "Unknown or inaccessible tenant."})
+    try:
+        decision = resolve_access(db, user, principal.home_permissions, target)
+    except TenantAccessDenied as exc:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail={
+            "error": "tenant_access_denied", "message": exc.message})
+    principal.tenant_id = target.id
+    principal.tenant_slug = target.slug
+    principal.permissions = decision.permissions
+    principal.roles = [decision.role_name]
+    principal.delegated_via = decision.via
+    principal.grant_id = decision.grant_id
+
+
+def _authenticate(db: Session, authorization: str | None,
+                  x_api_key: str | None) -> tuple[Principal, User]:
     # 1) API key (machine identities).
     if x_api_key:
         prefix = x_api_key.split(".", 1)[0]
@@ -94,7 +132,7 @@ def get_current_principal(
                 raise _unauthorized("API key owner is missing or disabled")
             key.last_used_at = datetime.now(UTC)
             db.flush()
-            return _principal_from_user(db, user, scopes=key.scopes or None)
+            return _principal_from_user(db, user, scopes=key.scopes or None), user
         raise _unauthorized("Invalid API key")
 
     # 2) Bearer JWT (interactive users).
@@ -127,7 +165,7 @@ def get_current_principal(
     user = db.get(User, user_id)
     if user is None or not user.is_active:
         raise _unauthorized("User not found or inactive")
-    return _principal_from_user(db, user, session_id=sid)
+    return _principal_from_user(db, user, session_id=sid), user
 
 
 def require_permission(permission: str):

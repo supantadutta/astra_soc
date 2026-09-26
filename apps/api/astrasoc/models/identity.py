@@ -12,12 +12,41 @@ from .base import TimestampMixin, UUIDMixin
 
 
 class Tenant(UUIDMixin, TimestampMixin, Base):
+    """A tenant in the MSSP hierarchy.
+
+    ``provider`` tenants are managed-security providers (the platform operator
+    is the root provider), ``reseller`` tenants resell a provider's service,
+    and ``customer`` tenants are the organisations whose security is managed.
+    Provider/reseller staff reach descendant customers only through the
+    delegated-access rules in :mod:`astrasoc.services.tenancy`.
+    """
+
     __tablename__ = "tenants"
 
     name: Mapped[str] = mapped_column(String(120), unique=True)
     slug: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    # Per-tenant guardrails: daily/monthly LLM budgets, private-model-only, etc.
+    kind: Mapped[str] = mapped_column(String(16), default="customer", index=True)
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID, ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    # onboarding | active | suspended | offboarding
+    status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    service_tier: Mapped[str] = mapped_column(String(24), default="professional")
+    # Data residency region (e.g. "eu", "us", "apac"); LLM providers and
+    # connectors must be compatible with it.
+    region: Mapped[str] = mapped_column(String(16), default="global")
+    # Per-severity SLA targets in minutes: {"critical": {"ack": 15, "resolve": 240}, ...}
+    sla_policy: Mapped[dict] = mapped_column(default=dict)
+    # Escalation contacts: [{"name","email","phone","role","level","notify_on":[...]}]
+    contacts: Mapped[list] = mapped_column(default=list)
+    # White-label presentation: {"display_name","logo_url","primary_color","support_email"}
+    branding: Mapped[dict] = mapped_column(default=dict)
+    contract_start: Mapped[datetime | None] = mapped_column(nullable=True)
+    contract_end: Mapped[datetime | None] = mapped_column(nullable=True)
+    # Guardrails & customer-controlled delegation policy, e.g.
+    # {"delegation": {"allow_provider_access": true, "allowed_roles": [...]},
+    #  "customer_approval_actions": ["isolate_endpoint"], "private_model_only": false}
     settings: Mapped[dict] = mapped_column(default=dict)
 
     users: Mapped[list[User]] = relationship(back_populates="tenant")

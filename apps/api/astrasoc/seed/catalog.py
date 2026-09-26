@@ -259,3 +259,77 @@ RESPONSE_POLICY = {
          "reason": "High-confidence reversible action on non-critical asset."},
     ],
 }
+
+
+# --- Starter detection content (spec §14) --------------------------------
+# Deterministic matchers evaluated on every ingested event by
+# services/pipeline.py. Field names refer to the normalized event (top-level
+# columns first, then the OCSF payload). ``threat_intel`` matches the value
+# against the tenant's enabled threat indicators.
+def _rule(key, name, severity, techniques, matcher, sigma, description, fps=None):
+    return {
+        "key": key, "name": name, "severity": severity, "attack_techniques": techniques,
+        "matcher": matcher, "sigma": sigma, "description": description,
+        "false_positives": fps or [], "status": "deployed", "enabled": True,
+        "data_sources": ["endpoint", "network", "identity"], "author": "ASTRASOC content team",
+        "version": "1.0.0", "approved_by": "ASTRASOC content team",
+        "deployment_target": "managed:starter",
+    }
+
+
+DETECTION_DEFS = [
+    _rule("shadow_copy_deletion", "Shadow copy deletion (ransomware precursor)", "critical",
+          ["T1490"],
+          {"all": [{"field": "activity", "op": "eq", "value": "Process create"},
+                   {"field": "cmdline", "op": "contains", "value": "delete shadows"}]},
+          "title: Shadow Copy Deletion\nlogsource: {category: process_creation, product: windows}\n"
+          "detection:\n  selection:\n    CommandLine|contains: 'delete shadows'\n  condition: selection\n"
+          "level: critical",
+          "vssadmin/wmic shadow-copy deletion — a classic pre-encryption step.",
+          ["Backup software maintenance (document exceptions)"]),
+    _rule("encoded_powershell", "Encoded PowerShell command", "high", ["T1059.001"],
+          {"all": [{"field": "activity", "op": "eq", "value": "Process create"},
+                   {"field": "cmdline", "op": "regex",
+                    "value": r"powershell(\.exe)?\s+.*-(e|enc|encodedcommand)\s"}]},
+          "title: Encoded PowerShell\nlogsource: {category: process_creation, product: windows}\n"
+          "detection:\n  selection:\n    CommandLine|re: 'powershell.*-enc'\n  condition: selection\n"
+          "level: high",
+          "PowerShell launched with an encoded command line.",
+          ["Some management agents use -EncodedCommand"]),
+    _rule("lsass_memory_access", "LSASS memory access (credential dumping)", "critical",
+          ["T1003.001"],
+          {"all": [{"field": "activity", "op": "eq", "value": "Process access"},
+                   {"field": "target_process", "op": "eq", "value": "lsass.exe"}]},
+          "title: LSASS Access\nlogsource: {category: process_access, product: windows}\n"
+          "detection:\n  selection:\n    TargetImage|endswith: '\\\\lsass.exe'\n  condition: selection\n"
+          "level: critical",
+          "A non-system process opened a handle to LSASS memory.",
+          ["EDR / AV scanners (allowlist by signer)"]),
+    _rule("ti_ip_connection", "Outbound connection to threat-intel IP", "high", ["T1071"],
+          {"all": [{"field": "activity", "op": "eq", "value": "Network connection"},
+                   {"field": "dst_ip", "op": "threat_intel"}]},
+          "title: Connection to Known-Bad IP\nlogsource: {category: network_connection}\n"
+          "detection:\n  selection:\n    DestinationIp|ioc: true\n  condition: selection\nlevel: high",
+          "Destination IP matches an enabled threat indicator.",
+          ["Stale indicators — review TI expiry"]),
+    _rule("ti_domain_dns", "DNS lookup of threat-intel domain", "high", ["T1071.004"],
+          {"all": [{"field": "activity", "op": "eq", "value": "DNS query"},
+                   {"field": "query", "op": "threat_intel"}]},
+          "title: DNS Query for Known-Bad Domain\nlogsource: {category: dns}\n"
+          "detection:\n  selection:\n    QueryName|ioc: true\n  condition: selection\nlevel: high",
+          "Queried domain matches an enabled threat indicator."),
+    _rule("signin_from_ti_ip", "Sign-in from threat-intel IP", "high", ["T1078"],
+          {"all": [{"field": "activity", "op": "eq", "value": "Sign-in"},
+                   {"field": "src_ip", "op": "threat_intel"}]},
+          "title: Sign-in From Known-Bad IP\nlogsource: {category: authentication}\n"
+          "detection:\n  selection:\n    SourceIp|ioc: true\n  condition: selection\nlevel: high",
+          "Successful authentication from an address on a threat-intel list."),
+    _rule("privileged_group_change", "Privileged group membership change", "high", ["T1098"],
+          {"all": [{"field": "activity", "op": "eq", "value": "Group membership change"},
+                   {"field": "group", "op": "in", "value": ["Domain Admins", "Enterprise Admins"]}]},
+          "title: Privileged Group Change\nlogsource: {product: windows, service: security}\n"
+          "detection:\n  selection:\n    EventID: 4728\n    TargetUserName: ['Domain Admins','Enterprise Admins']\n"
+          "  condition: selection\nlevel: high",
+          "An account was added to a highly privileged directory group.",
+          ["Approved change tickets (correlate with ITSM)"]),
+]
