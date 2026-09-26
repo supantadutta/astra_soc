@@ -1,0 +1,12 @@
+ASTRASOC {{ .Chart.AppVersion }} deployed as release "{{ .Release.Name }}".
+
+  URL:      {{ include "astrasoc.origin" . }}
+  API docs: {{ include "astrasoc.origin" . }}/api/docs
+
+First sign-in uses the bootstrap administrator from the secret
+(ASTRASOC_BOOTSTRAP_ADMIN_EMAIL). Demo accounts are never created in this
+chart. The API runs as a single replica by design; scale the web tier with
+web.replicas.
+
+Check readiness:
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}

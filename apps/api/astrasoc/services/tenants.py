@@ -16,7 +16,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from ..auth.permissions import ROLE_DESCRIPTIONS, roles_for_tenant_kind
-from ..auth.security import hash_password, normalize_email, password_policy_errors
+from ..auth.security import hash_password, is_valid_email, normalize_email, password_policy_errors
 from ..models import (
     Agent,
     AgentRun,
@@ -212,7 +212,7 @@ def provision_tenant(
 def create_user(db: Session, tenant: Tenant, *, email: str, full_name: str, password: str,
                 roles: list[str], enforce_policy: bool = True, attributes: dict | None = None) -> User:
     email = normalize_email(email)
-    if not email or "@" not in email:
+    if not is_valid_email(email):
         raise TenantError("invalid_email", "A valid email is required.")
     if db.execute(select(User).where(User.email == email)).first():
         raise TenantError("conflict", "A user with that email already exists.")

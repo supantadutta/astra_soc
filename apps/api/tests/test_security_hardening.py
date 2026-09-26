@@ -221,3 +221,17 @@ def test_oversized_body_rejected(client, manager):
     r = client.post("/api/v1/incidents/x/notes", headers={**manager, "content-length": str(6 * 1024 * 1024)},
                     content=b"{}")
     assert r.status_code == 413
+
+
+def test_internal_domain_accounts_can_sign_in(client, admin):
+    """Login and account creation must agree on what an email is."""
+    r = client.post("/api/v1/rbac/users", headers=admin, json={
+        "email": "SOC.Lead@corp.local", "full_name": "Lead", "password": "Internal!Pass123",
+        "roles": ["auditor"]})
+    assert r.status_code == 200, r.text
+    ok = client.post("/api/v1/auth/login", json={"email": "soc.lead@corp.local",
+                                                  "password": "Internal!Pass123"})
+    assert ok.status_code == 200
+    bad = client.post("/api/v1/rbac/users", headers=admin, json={
+        "email": "not-an-email", "password": "Internal!Pass123", "roles": ["auditor"]})
+    assert bad.status_code == 422

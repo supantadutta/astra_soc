@@ -263,3 +263,16 @@ def test_sla_sweeper_escalates_breaches_to_customer_and_provider(client, manager
     prov = client.get("/api/v1/mssp/notifications", headers=mssp_soc).json()
     assert any(i["category"] == "sla_breach" for i in cust["items"])
     assert any(i["category"] == "sla_breach" for i in prov["items"])
+
+
+def test_me_reports_acting_tenant_and_delegation(client, mssp_soc):
+    home = client.get("/api/v1/auth/me", headers=mssp_soc).json()
+    assert home["tenant_kind"] == "provider" and home["delegated_via"] is None
+    assert "mssp:portfolio" in home["home_permissions"]
+    acting = client.get("/api/v1/auth/me", headers=as_tenant(mssp_soc, "acme")).json()
+    assert acting["tenant_slug"] == "acme" and acting["tenant_kind"] == "customer"
+    assert acting["delegated_via"] == "provider"
+    assert acting["home_tenant_slug"] == home["tenant_slug"]
+    # Acting permissions are the customer's; portfolio authority stays at home.
+    assert "mssp:portfolio" not in acting["permissions"]
+    assert "mssp:portfolio" in acting["home_permissions"]

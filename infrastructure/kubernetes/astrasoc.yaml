@@ -1,21 +1,26 @@
-# ASTRASOC — Kubernetes manifests (demo/dev profile).
-# Apply with: kubectl apply -f infrastructure/kubernetes/astrasoc.yaml
-# For production, source secrets from a real secret store (Vault/External Secrets)
-# and add PersistentVolumeClaims + a managed Postgres.
+# ASTRASOC — plain Kubernetes manifests (single-cluster evaluation / pilot).
+#
+# Secrets are NOT in this file. Create them first:
+#
+#   kubectl create namespace astrasoc
+#   kubectl -n astrasoc create secret generic astrasoc-secrets \
+#     --from-literal=ASTRASOC_JWT_SECRET="$(openssl rand -base64 48)" \
+#     --from-literal=ASTRASOC_AUDIT_KEY="$(openssl rand -base64 48)" \
+#     --from-literal=POSTGRES_PASSWORD="$(openssl rand -hex 24)" \
+#     --from-literal=ASTRASOC_BOOTSTRAP_ADMIN_EMAIL=secops-admin@your-company.com \
+#     --from-literal=ASTRASOC_BOOTSTRAP_ADMIN_PASSWORD='<a strong password>'
+#   kubectl apply -f infrastructure/kubernetes/astrasoc.yaml
+#
+# In production prefer a managed PostgreSQL (replace the StatefulSet below
+# and point ASTRASOC_DATABASE_URL at it) and source the secret from
+# External Secrets / Vault. Edit the Ingress host and CORS origin.
+#
+# The API runs as ONE replica: the event bus, SLA sweeper and rate limiter are
+# in-process (see docs/KNOWN_LIMITATIONS.md). The web tier scales freely.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: astrasoc
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: astrasoc-secrets
-  namespace: astrasoc
-type: Opaque
-stringData:
-  # Replace in production; never commit real secrets.
-  ASTRASOC_JWT_SECRET: "change-me-in-production-to-a-long-random-string"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -26,9 +31,64 @@ data:
   ASTRASOC_ENVIRONMENT: "production"
   ASTRASOC_DEFAULT_MODE: "DEMO"
   ASTRASOC_ALLOW_LIVE_MODE: "true"
-  ASTRASOC_DATABASE_URL: "sqlite:////data/astrasoc.db"
-  ASTRASOC_CORS_ORIGINS: "http://localhost:3000"
+  ASTRASOC_AUTO_MIGRATE: "true"
+  ASTRASOC_CORS_ORIGINS: "https://soc.example.com"
+  # Pod network of the ingress controller; X-Forwarded-For is trusted only from here.
+  ASTRASOC_TRUSTED_PROXIES: "10.0.0.0/8"
 ---
+# ---------------------------------------------------------------- PostgreSQL
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: astrasoc-postgres
+  namespace: astrasoc
+  labels: { app: astrasoc-postgres }
+spec:
+  serviceName: astrasoc-postgres
+  replicas: 1
+  selector:
+    matchLabels: { app: astrasoc-postgres }
+  template:
+    metadata:
+      labels: { app: astrasoc-postgres }
+    spec:
+      securityContext: { runAsUser: 70, runAsGroup: 70, fsGroup: 70, runAsNonRoot: true }
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports: [{ containerPort: 5432 }]
+          env:
+            - { name: POSTGRES_USER, value: astrasoc }
+            - { name: POSTGRES_DB, value: astrasoc }
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: astrasoc-secrets, key: POSTGRES_PASSWORD } }
+          readinessProbe:
+            exec: { command: ["pg_isready", "-U", "astrasoc", "-d", "astrasoc"] }
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: "1", memory: 1Gi }
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ["ALL"] } }
+          volumeMounts:
+            - { name: pgdata, mountPath: /var/lib/postgresql/data }
+  volumeClaimTemplates:
+    - metadata: { name: pgdata }
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources: { requests: { storage: 20Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: astrasoc-postgres
+  namespace: astrasoc
+spec:
+  clusterIP: None
+  selector: { app: astrasoc-postgres }
+  ports: [{ port: 5432, targetPort: 5432 }]
+---
+# ----------------------------------------------------------------------- API
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -36,36 +96,56 @@ metadata:
   namespace: astrasoc
   labels: { app: astrasoc-api }
 spec:
-  replicas: 1
+  replicas: 1          # single writer: see header note
+  strategy: { type: Recreate }
   selector:
     matchLabels: { app: astrasoc-api }
   template:
     metadata:
       labels: { app: astrasoc-api }
     spec:
+      automountServiceAccountToken: false
+      securityContext: { runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: api
-          image: astrasoc/api:latest
+          image: ghcr.io/supantadutta/astrasoc-api:latest
           ports: [{ containerPort: 8000 }]
           envFrom:
             - configMapRef: { name: astrasoc-config }
-            - secretRef: { name: astrasoc-secrets }
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: astrasoc-secrets, key: POSTGRES_PASSWORD } }
+            - name: ASTRASOC_DATABASE_URL
+              value: postgresql+psycopg2://astrasoc:$(POSTGRES_PASSWORD)@astrasoc-postgres:5432/astrasoc
+            - name: ASTRASOC_JWT_SECRET
+              valueFrom: { secretKeyRef: { name: astrasoc-secrets, key: ASTRASOC_JWT_SECRET } }
+            - name: ASTRASOC_AUDIT_KEY
+              valueFrom: { secretKeyRef: { name: astrasoc-secrets, key: ASTRASOC_AUDIT_KEY } }
+            - name: ASTRASOC_BOOTSTRAP_ADMIN_EMAIL
+              valueFrom: { secretKeyRef: { name: astrasoc-secrets, key: ASTRASOC_BOOTSTRAP_ADMIN_EMAIL, optional: true } }
+            - name: ASTRASOC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom: { secretKeyRef: { name: astrasoc-secrets, key: ASTRASOC_BOOTSTRAP_ADMIN_PASSWORD, optional: true } }
+          startupProbe:
+            httpGet: { path: /api/v1/health/live, port: 8000 }
+            periodSeconds: 5
+            failureThreshold: 36   # up to 3 min for migrations
           readinessProbe:
-            httpGet: { path: /health, port: 8000 }
-            initialDelaySeconds: 15
+            httpGet: { path: /api/v1/health/ready, port: 8000 }
             periodSeconds: 10
           livenessProbe:
-            httpGet: { path: /health, port: 8000 }
-            initialDelaySeconds: 20
+            httpGet: { path: /api/v1/health/live, port: 8000 }
             periodSeconds: 20
           resources:
-            requests: { cpu: "100m", memory: "256Mi" }
-            limits: { cpu: "1", memory: "1Gi" }
+            requests: { cpu: 250m, memory: 384Mi }
+            limits: { cpu: "2", memory: 1Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
           volumeMounts:
-            - { name: data, mountPath: /data }
+            - { name: tmp, mountPath: /tmp }
       volumes:
-        - name: data
-          emptyDir: {}   # Use a PVC in production.
+        - { name: tmp, emptyDir: {} }
 ---
 apiVersion: v1
 kind: Service
@@ -76,6 +156,7 @@ spec:
   selector: { app: astrasoc-api }
   ports: [{ port: 8000, targetPort: 8000 }]
 ---
+# ----------------------------------------------------------------------- Web
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -83,22 +164,33 @@ metadata:
   namespace: astrasoc
   labels: { app: astrasoc-web }
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels: { app: astrasoc-web }
   template:
     metadata:
       labels: { app: astrasoc-web }
     spec:
+      automountServiceAccountToken: false
+      securityContext: { runAsNonRoot: true, runAsUser: 1001, runAsGroup: 1001, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: web
-          image: astrasoc/web:latest
+          image: ghcr.io/supantadutta/astrasoc-web:latest
           ports: [{ containerPort: 3000 }]
           env:
-            - { name: NEXT_PUBLIC_API_BASE_URL, value: "http://astrasoc-api:8000" }
+            - { name: API_INTERNAL_URL, value: "http://astrasoc-api:8000" }
+          readinessProbe:
+            httpGet: { path: /login, port: 3000 }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /login, port: 3000 }
+            periodSeconds: 20
           resources:
-            requests: { cpu: "100m", memory: "256Mi" }
-            limits: { cpu: "500m", memory: "512Mi" }
+            requests: { cpu: 100m, memory: 192Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
 ---
 apiVersion: v1
 kind: Service
@@ -109,16 +201,27 @@ spec:
   selector: { app: astrasoc-web }
   ports: [{ port: 3000, targetPort: 3000 }]
 ---
+# ------------------------------------------------------------------- Ingress
+# /api/* goes straight to the API (paths are preserved — no rewrite); every
+# other path goes to the web tier. Buffering is off so the SSE stream flows.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: astrasoc
   namespace: astrasoc
   annotations:
-    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "5m"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
 spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [soc.example.com]
+      secretName: astrasoc-tls
   rules:
-    - http:
+    - host: soc.example.com
+      http:
         paths:
           - path: /api
             pathType: Prefix

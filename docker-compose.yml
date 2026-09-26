@@ -1,78 +1,95 @@
 # ==========================================================================
-# ASTRASOC — development / production-like profile
-# Adds PostgreSQL and Redis. The API auto-creates tables on first boot (use
-# Alembic migrations in a real production deployment: `alembic upgrade head`).
-# Optional enterprise datastores (ClickHouse, Neo4j, OpenSearch, Redpanda,
-# Temporal, OPA, Vault, Keycloak) are documented in docs/DEPLOYMENT.md; the
-# platform runs degraded-but-functional without them and reports their status
-# honestly on the Platform Health page.
+# ASTRASOC — production-like single-host profile (PostgreSQL)
+#
+# Required (compose refuses to start without them):
+#   ASTRASOC_JWT_SECRET        ≥32 random chars   (openssl rand -base64 48)
+#   ASTRASOC_AUDIT_KEY         ≥32 random chars, different from the JWT secret
+#   POSTGRES_PASSWORD          database password
+#   ASTRASOC_BOOTSTRAP_ADMIN_EMAIL / ASTRASOC_BOOTSTRAP_ADMIN_PASSWORD
+#                              first platform administrator (created once)
+# Put them in a .env file next to this compose file (never commit it).
 #
 #   docker compose up --build
+#
+# The API refuses to start with weak secrets, wildcard CORS or SQLite, runs
+# `alembic upgrade head` on boot, and never seeds demo accounts. Only the web
+# port is published; PostgreSQL and the API stay on the internal network.
+# Terminate TLS in front of port 3000 (reverse proxy / load balancer).
 # ==========================================================================
+x-api-env: &api-env
+  ASTRASOC_ENVIRONMENT: production
+  ASTRASOC_DATABASE_URL: postgresql+psycopg2://astrasoc:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/astrasoc
+  ASTRASOC_JWT_SECRET: ${ASTRASOC_JWT_SECRET:?set ASTRASOC_JWT_SECRET}
+  ASTRASOC_AUDIT_KEY: ${ASTRASOC_AUDIT_KEY:?set ASTRASOC_AUDIT_KEY}
+  ASTRASOC_BOOTSTRAP_ADMIN_EMAIL: ${ASTRASOC_BOOTSTRAP_ADMIN_EMAIL:-}
+  ASTRASOC_BOOTSTRAP_ADMIN_PASSWORD: ${ASTRASOC_BOOTSTRAP_ADMIN_PASSWORD:-}
+  ASTRASOC_AUTO_MIGRATE: "true"
+  ASTRASOC_DEFAULT_MODE: ${ASTRASOC_DEFAULT_MODE:-DEMO}
+  ASTRASOC_ALLOW_LIVE_MODE: "true"
+  ASTRASOC_CORS_ORIGINS: ${ASTRASOC_PUBLIC_URL:-https://soc.example.com}
+  # The web container is the only client; trust its forwarded client IP.
+  ASTRASOC_TRUSTED_PROXIES: 172.16.0.0/12
+  # Optional HashiCorp Vault KV v2 for vault:// secret references.
+  ASTRASOC_VAULT_ADDR: ${ASTRASOC_VAULT_ADDR:-}
+  ASTRASOC_VAULT_TOKEN: ${ASTRASOC_VAULT_TOKEN:-}
+
 services:
   postgres:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: astrasoc
-      POSTGRES_PASSWORD: astrasoc
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
       POSTGRES_DB: astrasoc
     volumes:
       - astrasoc_pg:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U astrasoc"]
+      test: ["CMD-SHELL", "pg_isready -U astrasoc -d astrasoc"]
       interval: 10s
       timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      retries: 10
+    restart: unless-stopped
 
   api:
     build:
       context: ./apps/api
-    environment:
-      ASTRASOC_ENVIRONMENT: production
-      ASTRASOC_DATABASE_URL: postgresql+psycopg2://astrasoc:astrasoc@postgres:5432/astrasoc
-      ASTRASOC_REDIS_URL: redis://redis:6379/0
-      ASTRASOC_DEFAULT_MODE: DEMO
-      ASTRASOC_ALLOW_LIVE_MODE: "true"
-      # REQUIRED in production — set a strong secret.
-      ASTRASOC_JWT_SECRET: ${ASTRASOC_JWT_SECRET:-change-me-in-production-to-a-long-random-string}
-      ASTRASOC_CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+    environment: *api-env
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
-    ports:
-      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/ready', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 40s
+      retries: 5
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
 
   web:
     build:
       context: ./apps/web
     environment:
-      NEXT_PUBLIC_API_BASE_URL: http://api:8000
+      API_INTERNAL_URL: http://api:8000
+      # Your TLS reverse proxy in front of :3000 must set X-Forwarded-For.
+      # Set to "false" if clients reach port 3000 directly.
+      WEB_TRUST_FORWARDED_FOR: ${WEB_TRUST_FORWARDED_FOR:-true}
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     ports:
       - "3000:3000"
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
 
-  # Optional mock integration server for connector contract testing.
+  # Mock integration server for connector contract testing only:
+  #   docker compose --profile mocks up mockserver
   mockserver:
     build:
       context: ./apps/api
     command: ["uvicorn", "astrasoc.services.connectors.mock_server:mock_app", "--host", "0.0.0.0", "--port", "9900"]
-    ports:
-      - "9900:9900"
+    profiles: ["mocks"]
 
 volumes:
   astrasoc_pg:

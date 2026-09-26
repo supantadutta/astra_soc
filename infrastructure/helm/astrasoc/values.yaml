@@ -1,38 +1,78 @@
 # Default values for the ASTRASOC Helm chart.
-global:
-  imageRegistry: astrasoc
+#
+# Secrets: either point `secrets.existingSecret` at a Secret you manage
+# (External Secrets / Vault / sealed-secrets — recommended), or pass the
+# values at install time with --set (never commit them to a values file).
+# The chart refuses to render without them.
+
+image:
+  registry: ghcr.io/supantadutta
+  tag: ""            # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
 
 api:
-  image: astrasoc/api:latest
-  replicas: 1
+  repository: astrasoc-api
+  # The API keeps the event bus, SLA sweeper and rate limiter in-process, so
+  # it must run as exactly ONE replica (the chart enforces this).
   port: 8000
-  env:
-    ASTRASOC_ENVIRONMENT: production
-    ASTRASOC_DEFAULT_MODE: DEMO
-    ASTRASOC_ALLOW_LIVE_MODE: "true"
-    ASTRASOC_DATABASE_URL: "sqlite:////data/astrasoc.db"
+  defaultMode: DEMO          # DEMO | LIVE (per-tenant mode can be changed at runtime)
+  allowLiveMode: true
+  autoMigrate: true          # alembic upgrade head on startup
+  trustedProxies: "10.0.0.0/8"
+  extraEnv: {}               # e.g. ASTRASOC_EGRESS_HOST_ALLOWLIST: ".splunkcloud.com"
+  resources:
+    requests: { cpu: 250m, memory: 384Mi }
+    limits: { cpu: "2", memory: 1Gi }
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+web:
+  repository: astrasoc-web
+  replicas: 2
+  port: 3000
+  resources:
+    requests: { cpu: 100m, memory: 192Mi }
+    limits: { cpu: "1", memory: 512Mi }
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+secrets:
+  # Name of an existing Secret with keys ASTRASOC_JWT_SECRET, ASTRASOC_AUDIT_KEY,
+  # and either ASTRASOC_DATABASE_URL or POSTGRES_PASSWORD (bundled Postgres);
+  # optionally ASTRASOC_BOOTSTRAP_ADMIN_EMAIL / _PASSWORD, ASTRASOC_VAULT_TOKEN.
+  existingSecret: ""
+  jwtSecret: ""
+  auditKey: ""
+  databaseUrl: ""            # external PostgreSQL (when postgresql.enabled=false)
+  postgresPassword: ""       # bundled PostgreSQL
+  bootstrapAdminEmail: ""
+  bootstrapAdminPassword: ""
+  vaultToken: ""
+
+vault:
+  addr: ""                   # HashiCorp Vault for vault:// secret references
+  mount: secret
+
+# Bundled single-instance PostgreSQL (evaluation / pilots). Use a managed,
+# backed-up PostgreSQL for production and set secrets.databaseUrl.
+postgresql:
+  enabled: true
+  image: postgres:16-alpine
+  storage: 20Gi
+  storageClassName: ""
   resources:
     requests: { cpu: 100m, memory: 256Mi }
     limits: { cpu: "1", memory: 1Gi }
 
-web:
-  image: astrasoc/web:latest
-  replicas: 1
-  port: 3000
-  apiBaseUrl: http://astrasoc-api:8000
-
-# Set a strong secret in production (or use External Secrets).
-secrets:
-  jwtSecret: "change-me-in-production"
-
 ingress:
   enabled: true
   className: nginx
-  host: astrasoc.local
-
-# Optional enterprise dependencies (disabled by default; platform runs
-# degraded-but-functional without them).
-postgresql:
-  enabled: false
-redis:
-  enabled: false
+  host: soc.example.com
+  tlsSecretName: astrasoc-tls
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "5m"

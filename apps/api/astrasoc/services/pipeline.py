@@ -56,10 +56,61 @@ _OCSF = {
 }
 
 
+# Vendor spellings (Sysmon / Windows Security / ECS / common EDR exports)
+# mapped onto the canonical activity names detections are written against.
+_ACTIVITY_ALIASES = {
+    "process_creation": "Process create", "process_create": "Process create",
+    "processcreate": "Process create", "process": "Process create",
+    "process_start": "Process create", "sysmon:1": "Process create", "4688": "Process create",
+    "process_access": "Process access", "sysmon:10": "Process access",
+    "network_connection": "Network connection", "network": "Network connection",
+    "connection": "Network connection", "sysmon:3": "Network connection",
+    "dns": "DNS query", "dns_query": "DNS query", "sysmon:22": "DNS query",
+    "sign_in": "Sign-in", "signin": "Sign-in", "login": "Sign-in", "logon": "Sign-in",
+    "authentication": "Sign-in", "4624": "Sign-in",
+    "file_write": "File write", "file_create": "File write", "sysmon:11": "File write",
+    "group_membership_change": "Group membership change", "4728": "Group membership change",
+    "4732": "Group membership change", "4756": "Group membership change",
+}
+
+# Field aliases -> canonical field names used by detection matchers. The
+# canonical name wins when both are present; originals stay in the payload.
+_FIELD_ALIASES = {
+    "cmdline": ("command_line", "commandline", "CommandLine", "process.command_line",
+                "process_command_line"),
+    "target_process": ("target_image", "TargetImage", "target.process.name"),
+    "query": ("dns_query", "QueryName", "dns.question.name"),
+    "group": ("group_name", "TargetUserName", "group.name"),
+    "process_name": ("image", "Image", "process.name", "process.executable"),
+    "parent_process": ("parent_image", "ParentImage", "process.parent.name"),
+}
+
+
+def _canonical_activity(value: str) -> str:
+    if value in _OCSF:
+        return value
+    key = value.strip().lower().replace(" ", "_").replace("-", "_")
+    return _ACTIVITY_ALIASES.get(key, value)
+
+
+def _with_field_aliases(raw: dict) -> dict:
+    out = dict(raw)
+    for canonical, aliases in _FIELD_ALIASES.items():
+        if out.get(canonical) in (None, ""):
+            for a in aliases:
+                if out.get(a) not in (None, ""):
+                    out[canonical] = out[a]
+                    break
+    return out
+
+
 def normalize(raw: dict) -> dict:
-    """Map a loosely-structured event onto the normalized columns. Unknown
-    keys are kept in the OCSF payload so rules can still match them."""
-    activity = str(raw.get("activity") or raw.get("action") or raw.get("event_type") or "unknown")[:120]
+    """Map a loosely-structured event onto the normalized columns. Common
+    vendor field / activity spellings are canonicalised; unknown keys are
+    kept in the OCSF payload so rules can still match them."""
+    raw = _with_field_aliases(raw)
+    activity = _canonical_activity(
+        str(raw.get("activity") or raw.get("action") or raw.get("event_type") or "unknown"))[:120]
     cls = _OCSF.get(activity, (0, raw.get("category", "Other")))
     ts = raw.get("event_time") or raw.get("ts") or raw.get("time")
     try:

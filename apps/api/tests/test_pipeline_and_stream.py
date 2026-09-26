@@ -130,3 +130,13 @@ def test_generator_tick_runs_pipeline_for_demo_customers():
     from astrasoc.seed.engine import _emit_tick
 
     assert _emit_tick() >= 4  # acme, globex, initech, contoso (+ any test tenants)
+
+
+def test_ingest_accepts_common_vendor_field_spellings(client, admin):
+    """Sysmon/ECS-style names must hit the same detections as canonical ones."""
+    key = _ingest_key(client, {**admin, "X-Tenant-ID": "acme"})
+    r = client.post("/api/v1/ingest/events", headers=key, json={"events": [{
+        "source": "edr", "event_type": "process_creation", "host": "ws-vendor-01", "user": "bob",
+        "CommandLine": "powershell.exe -enc SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoA"}]})
+    assert r.status_code == 200, r.text
+    assert r.json()["alerts"] >= 1

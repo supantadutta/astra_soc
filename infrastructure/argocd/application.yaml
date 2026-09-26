@@ -1,4 +1,10 @@
 # ArgoCD Application — GitOps deployment of ASTRASOC via the Helm chart.
+#
+# Secrets are NOT set here. Create the Secret named below out of band
+# (External Secrets Operator, Vault Agent, sealed-secrets) with keys:
+#   ASTRASOC_JWT_SECRET, ASTRASOC_AUDIT_KEY, POSTGRES_PASSWORD
+#   (or ASTRASOC_DATABASE_URL with postgresql.enabled=false),
+#   ASTRASOC_BOOTSTRAP_ADMIN_EMAIL, ASTRASOC_BOOTSTRAP_ADMIN_PASSWORD
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -10,11 +16,16 @@ spec:
   project: default
   source:
     repoURL: https://github.com/supantadutta/astra_soc.git
-    targetRevision: HEAD
+    targetRevision: main
     path: infrastructure/helm/astrasoc
     helm:
-      valueFiles:
-        - values.yaml
+      valuesObject:
+        image:
+          tag: "0.2.0"          # pin a released tag; never track :latest in production
+        secrets:
+          existingSecret: astrasoc-secrets
+        ingress:
+          host: soc.example.com
   destination:
     server: https://kubernetes.default.svc
     namespace: astrasoc

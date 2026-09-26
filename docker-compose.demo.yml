@@ -1,11 +1,13 @@
 # ==========================================================================
 # ASTRASOC — DEMO profile
-# Zero external credentials, zero enterprise infrastructure. Just the API
-# (SQLite + simulated LLM + mock connectors) and the web command center.
+# Zero external credentials, zero enterprise infrastructure: the API (SQLite,
+# simulated LLM, mock connectors, simulated telemetry generator) and the web
+# command center. Demo accounts use the well-known password Demo!Pass123 —
+# never expose this profile to an untrusted network.
 #
 #   docker compose -f docker-compose.demo.yml up --build
-#   → API  http://localhost:8000  (docs at /api/docs)
-#   → Web  http://localhost:3000  (login shown on the page)
+#   → Web  http://localhost:3000   (sign in as admin@astrasoc.io)
+#   → API  http://127.0.0.1:8000/api/docs
 # ==========================================================================
 services:
   api:
@@ -20,18 +22,21 @@ services:
     volumes:
       - astrasoc_demo_data:/data
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
+    restart: unless-stopped
 
   web:
     build:
       context: ./apps/web
     environment:
-      # Server-side rewrites proxy /api/* to the API service.
-      NEXT_PUBLIC_API_BASE_URL: http://api:8000
+      # Read at runtime by the /api/* proxy route inside the web container.
+      API_INTERNAL_URL: http://api:8000
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     ports:
       - "3000:3000"
+    restart: unless-stopped
 
 volumes:
   astrasoc_demo_data:

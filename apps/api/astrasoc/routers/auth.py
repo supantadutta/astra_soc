@@ -161,7 +161,10 @@ def logout(
 
 
 @router.get("/me", response_model=MeResponse)
-def me(principal: Principal = Depends(get_current_principal)) -> MeResponse:
+def me(principal: Principal = Depends(get_current_principal),
+       db: Session = Depends(get_db)) -> MeResponse:
+    tenant = db.get(Tenant, principal.tenant_id)
+    home_id = principal.home_tenant_id or principal.tenant_id
     return MeResponse(
         id=str(principal.user_id),
         email=principal.email,
@@ -170,6 +173,13 @@ def me(principal: Principal = Depends(get_current_principal)) -> MeResponse:
         roles=principal.roles,
         permissions=principal.permissions,
         is_service_account=principal.is_service_account,
+        tenant_slug=tenant.slug if tenant else principal.tenant_slug,
+        tenant_name=tenant.name if tenant else "",
+        tenant_kind=tenant.kind if tenant else "",
+        home_tenant_id=str(home_id),
+        home_tenant_slug=principal.home_tenant_slug or (tenant.slug if tenant else ""),
+        home_permissions=principal.home_permissions or principal.permissions,
+        delegated_via=principal.delegated_via,
     )
 
 

@@ -1,11 +1,13 @@
 """Auth request/response schemas."""
 from __future__ import annotations
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 
 
 class LoginRequest(BaseModel):
-    email: EmailStr
+    # Not EmailStr: that rejects internal domains (corp.local) that account
+    # creation accepts. Unknown or malformed addresses simply fail with 401.
+    email: str = Field(..., min_length=3, max_length=254)
     password: str = Field(..., min_length=1)
 
 
@@ -28,6 +30,15 @@ class MeResponse(BaseModel):
     roles: list[str]
     permissions: list[str]
     is_service_account: bool
+    # Tenant context the request is acting in (after any X-Tenant-ID switch).
+    tenant_slug: str = ""
+    tenant_name: str = ""
+    tenant_kind: str = ""
+    # MSSP delegation: where the user really belongs and how they got here.
+    home_tenant_id: str | None = None
+    home_tenant_slug: str = ""
+    home_permissions: list[str] = []
+    delegated_via: str | None = None
 
 
 class APIKeyCreate(BaseModel):

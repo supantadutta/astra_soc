@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -55,6 +56,17 @@ def password_policy_errors(password: str) -> list[str]:
 
 def normalize_email(email: str) -> str:
     return (email or "").strip().lower()
+
+
+_EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[a-z0-9-]+(\.[a-z0-9-]+)+$")
+
+
+def is_valid_email(email: str) -> bool:
+    """Structural check only. Internal / special-use domains (``corp.local``,
+    ``.internal``) are allowed — enterprise directories commonly use them, and
+    login and account creation must agree on what an address is."""
+    email = normalize_email(email)
+    return len(email) <= 254 and bool(_EMAIL_RE.match(email))
 
 
 # --- JWT -----------------------------------------------------------------

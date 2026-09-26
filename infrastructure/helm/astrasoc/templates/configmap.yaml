@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "astrasoc.fullname" . }}-config
+  labels: {{- include "astrasoc.labels" . | nindent 4 }}
+data:
+  ASTRASOC_ENVIRONMENT: "production"
+  ASTRASOC_DEFAULT_MODE: {{ .Values.api.defaultMode | quote }}
+  ASTRASOC_ALLOW_LIVE_MODE: {{ .Values.api.allowLiveMode | quote }}
+  ASTRASOC_AUTO_MIGRATE: {{ .Values.api.autoMigrate | quote }}
+  ASTRASOC_CORS_ORIGINS: {{ include "astrasoc.origin" . | quote }}
+  ASTRASOC_TRUSTED_PROXIES: {{ .Values.api.trustedProxies | quote }}
+  {{- with .Values.vault.addr }}
+  ASTRASOC_VAULT_ADDR: {{ . | quote }}
+  ASTRASOC_VAULT_MOUNT: {{ $.Values.vault.mount | quote }}
+  {{- end }}
+  {{- range $k, $v := .Values.api.extraEnv }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}
