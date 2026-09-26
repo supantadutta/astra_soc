@@ -131,16 +131,18 @@ class ModelGateway:
     def _call(
         self, db: Session, dep: ModelDeployment, prov: ModelProvider, capability: str, task: dict,
         timeout: int | None = None,
-    ) -> tuple[dict, int, bool]:
-        """Returns (raw_output, tokens, simulated). Raises on hard failure.
-        Real providers only ever receive the wrapped/DLP'd task."""
+    ) -> tuple[dict, int, bool, bool]:
+        """Returns (raw_output, tokens, simulated, context_trimmed). Raises on
+        hard failure. Real providers only ever receive the wrapped/DLP'd task,
+        bounded to the prompt budget as valid JSON."""
         if prov.kind == ProviderKind.SIMULATED.value:
-            return self._run_simulated(capability, task), 350, True
+            return self._run_simulated(capability, task), 350, True, False
 
         # Real provider path.
         safe_task, _ = guardrails.prepare_untrusted(task)
+        bounded, trimmed = guardrails.fit_to_budget(safe_task, PROMPT_BUDGET_CHARS)
         system = _system_prompt(capability)
-        user = _user_prompt(safe_task)
+        user = _user_prompt(bounded)
         text, usage = providers.chat_completion(
             prov.kind, prov.base_url, prov.secret_ref, dep.model_identifier,
             system, user, timeout=min(prov.timeout_seconds, timeout or prov.timeout_seconds),
@@ -150,7 +152,7 @@ class ModelGateway:
         raw = _extract_json(text)
         raw.setdefault("model", dep.model_identifier)
         raw.setdefault("provider", prov.kind)
-        return raw, tokens, False
+        return raw, tokens, False, trimmed
 
     def invoke(
         self,
@@ -196,8 +198,11 @@ class ModelGateway:
         fallback_used = False
         for idx, (dep, prov) in enumerate(candidates):
             try:
-                raw, tokens, is_sim = self._call(db, dep, prov, capability, task, timeout)
+                raw, tokens, is_sim, trimmed = self._call(db, dep, prov, capability, task, timeout)
                 claim = validate_ai_output(raw)  # reject malformed output
+                if trimmed:
+                    notes.append("Case context exceeded the prompt budget and was trimmed "
+                                 "(structurally; the model was told what was omitted).")
                 used_dep, used_prov = dep, prov
                 cost = tokens / 1000 * (dep.cost_input_per_1k + dep.cost_output_per_1k)
                 self._record_usage(prov, tokens, cost, ok=True)
@@ -252,7 +257,7 @@ class ModelGateway:
         if verifier_pair and verifier_pair[1].id != primary_prov.id and not self._circuit_open(verifier_pair[1]):
             dep, prov = verifier_pair
             try:
-                vraw, _, _ = self._call(db, dep, prov, "independent_critic",
+                vraw, _, _, _ = self._call(db, dep, prov, "independent_critic",
                                         {**task, "primary_claim": claim.model_dump()})
                 vclaim = validate_ai_output(vraw)
                 agree = abs(vclaim.confidence - claim.confidence) < 0.3
@@ -286,8 +291,14 @@ def _system_prompt(capability: str) -> str:
     )
 
 
+# Upper bound on the serialized case sent to a real model (characters).
+PROMPT_BUDGET_CHARS = 12000
+
+
 def _user_prompt(task: dict) -> str:
-    return "Analyze this case and return the JSON claim.\n\n" + json.dumps(task, default=str)[:12000]
+    # ``task`` is already bounded by guardrails.fit_to_budget; never slice the
+    # serialized JSON (that sends the model syntactically broken input).
+    return "Analyze this case and return the JSON claim.\n\n" + json.dumps(task, default=str)
 
 
 def _extract_json(text: str) -> dict:

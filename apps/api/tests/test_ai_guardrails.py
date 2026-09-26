@@ -105,7 +105,7 @@ def test_real_provider_gets_wrapped_content_and_fake_evidence_is_dropped(client,
     try:
         client.post("/api/v1/mode/switch", headers=h, json={"mode": "DEMO", "llm_strategy": "hosted"})
         run = client.post("/api/v1/agents/triage_agent/run", headers=h, json={"incident_id": iid}).json()
-        assert run["provider_used"] == "openai_compatible", run
+        assert run["provider_used"] == "openai_compatible", ((run.get("output") or {}).get("notes"), run.get("error"))
         claim = run["output"]["claim"]
         assert "hallucinated-id-1" not in claim["evidence_ids"]
         assert claim["derived_from_untrusted_content"] is True
@@ -128,3 +128,24 @@ def test_routes_cannot_use_another_tenants_deployment(client, manager, globex_ad
     r = client.put("/api/v1/models/routes/fast_triage", headers=as_tenant(admin, "acme"),
                    json={"primary_deployment_id": dep_id})
     assert r.status_code == 422
+
+
+def test_oversized_case_is_trimmed_structurally_not_sliced():
+    """Regression: the prompt used to slice serialized JSON at 12k chars,
+    sending real models syntactically broken input for large cases."""
+    from astrasoc.services.model_gateway.gateway import PROMPT_BUDGET_CHARS, _user_prompt
+    from astrasoc.services.model_gateway.guardrails import fit_to_budget
+
+    task = {"incident": {"title": "t", "summary": "s" * 9000},
+            "evidence": [{"id": f"e{i}", "title": "x", "content": "c" * 1500} for i in range(40)],
+            "timeline": [{"id": f"t{i}", "title": "y", "detail": "d" * 800} for i in range(60)],
+            "steps": [{"tool": "x", "ok": True}] * 30}
+    bounded, trimmed = fit_to_budget(task, PROMPT_BUDGET_CHARS)
+    assert trimmed and "_context_note" in bounded
+    body = _user_prompt(bounded).split("\n\n", 1)[1]
+    assert len(body) <= PROMPT_BUDGET_CHARS
+    parsed = json.loads(body)  # always valid JSON
+    assert parsed["evidence"] and parsed["evidence"][0]["id"] == "e0"
+    assert len(task["evidence"]) == 40  # caller's task untouched
+    small = {"incident": {"title": "t"}, "evidence": []}
+    assert fit_to_budget(small, PROMPT_BUDGET_CHARS) == (small, False)

@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -151,3 +152,56 @@ def prepare_untrusted(task: dict) -> tuple[dict, dict]:
 
 def valid_evidence_ids(task: dict) -> set[str]:
     return {str(e.get("id")) for e in task.get("evidence") or [] if isinstance(e, dict) and e.get("id")}
+
+
+# Sections trimmed first when a case is too large for the prompt budget.
+_TRIM_ORDER = ("steps", "timeline", "alerts", "hypotheses", "entities", "evidence")
+_MAX_STRING = 4000
+
+
+def _cap_strings(value, limit: int):
+    if isinstance(value, str):
+        return value if len(value) <= limit else value[:limit] + " …[truncated]"
+    if isinstance(value, list):
+        return [_cap_strings(v, limit) for v in value]
+    if isinstance(value, dict):
+        return {k: _cap_strings(v, limit) for k, v in value.items()}
+    return value
+
+
+def _size(task: dict) -> int:
+    return len(json.dumps(task, default=str))
+
+
+def fit_to_budget(task: dict, budget: int) -> tuple[dict, bool]:
+    """Shrink a case so its JSON fits ``budget`` characters while remaining
+    valid JSON: cap long strings, then trim list sections from the end
+    (least relevant first), halving each until it fits. Returns the bounded
+    copy and whether anything was removed. Never slices serialized JSON."""
+    if _size(task) <= budget:
+        return task, False
+    budget = max(1000, budget - 400)  # room for the note appended below
+    bounded = _cap_strings(copy.deepcopy(task), _MAX_STRING)
+    limit = _MAX_STRING
+    while _size(bounded) > budget:
+        progressed = False
+        for section in _TRIM_ORDER:
+            items = bounded.get(section)
+            if isinstance(items, list) and len(items) > 1:
+                bounded[section] = items[: len(items) // 2]
+                progressed = True
+                if _size(bounded) <= budget:
+                    break
+        if _size(bounded) <= budget:
+            break
+        if not progressed:
+            if limit <= 200:
+                break
+            limit //= 2
+            bounded = _cap_strings(bounded, limit)
+    kept = {s: len(bounded[s]) for s in _TRIM_ORDER if isinstance(bounded.get(s), list)}
+    bounded["_context_note"] = (
+        "This case was trimmed to fit the model context. Section sizes sent: "
+        + ", ".join(f"{k}={v}" for k, v in kept.items())
+        + ". Absent items are not evidence of absence.")
+    return bounded, True
