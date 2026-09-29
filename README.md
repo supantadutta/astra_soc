@@ -25,6 +25,9 @@ Open <http://localhost:3000>. Demo accounts are listed on the sign-in page
 `manager@acme.io` (customer SOC manager) and `ciso@acme.io` (customer admin).
 The walkthrough is in [docs/QUICKSTART.md](docs/QUICKSTART.md).
 
+To understand the whole platform (data sources, the flow, every capability,
+and what is not built yet), read [docs/PLATFORM_GUIDE.md](docs/PLATFORM_GUIDE.md).
+
 For production see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). The API refuses to
 start with unsafe configuration and never creates demo accounts in production.
 

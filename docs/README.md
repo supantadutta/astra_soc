@@ -2,6 +2,7 @@
 
 | Doc | What it covers |
 |-----|----------------|
+| [PLATFORM_GUIDE](PLATFORM_GUIDE.md) | **Start here.** Where data comes from, the full flow, every capability and page, and what is not built yet |
 | [QUICKSTART](QUICKSTART.md) | Run the demo, log in, walk the MSSP and SOC workflows |
 | [MSSP](MSSP.md) | Tenant hierarchy, delegated access, tiers, SLAs, the managed-service console |
 | [ARCHITECTURE](ARCHITECTURE.md) | Services, data model, and the trust boundary |

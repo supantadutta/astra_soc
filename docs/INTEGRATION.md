@@ -19,7 +19,8 @@ and a mock server for testing.
 ## Configuring a connector
 1. **Integrations** → pick a connector → **Configure**.
 2. Uncheck **Use built-in mock server**, set the base URL and a secret reference
-   (e.g. `vault://splunk#token`) and set the env var.
+   in the tenant's namespace (e.g. `vault://tenants/acme/splunk#token`; see
+   `.env.example` for how references resolve without a Vault server).
 3. **Test connection** — the result reflects the real endpoint (or `not_configured`).
 4. Enable read and/or write (write = response actions).
 
